@@ -50,7 +50,7 @@ The tool provides a unified interactive menu with **16 modules**:
 Download the latest release for your architecture (usually `amd64`).
 
 ```bash
-wget https://github.com/your-repo/vmware-tuner/releases/latest/download/vmware-tuner
+wget https://github.com/julo0211/vmware-tuner/releases/latest/download/vmware-tuner
 chmod +x vmware-tuner
 sudo ./vmware-tuner
 ```
@@ -59,7 +59,7 @@ sudo ./vmware-tuner
 Requires Go 1.21+.
 
 ```bash
-git clone https://github.com/your-repo/vmware-tuner.git
+git clone https://github.com/julo0211/vmware-tuner.git
 cd vmware-tuner
 go build -o vmware-tuner .
 sudo ./vmware-tuner
