@@ -61,6 +61,7 @@ Requires Go 1.21+.
 ```bash
 git clone https://github.com/julo0211/vmware-tuner.git
 cd vmware-tuner
+go mod tidy
 go build -o vmware-tuner .
 sudo ./vmware-tuner
 ```
