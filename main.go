@@ -504,3 +504,137 @@ func verifyConfig(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
+
+func showMainMenu() int {
+	fmt.Println("What do you want to do?")
+	fmt.Println("  [1] Optimize this VM (Tuning)")
+	fmt.Println("  [2] Restore a backup (Rollback)")
+	fmt.Println("  [3] Audit System (Score)")
+	fmt.Println("  [4] Expand Disk")
+	fmt.Println("  [5] Fix Time Sync")
+	fmt.Println("  [6] Clean System")
+	fmt.Println("  [7] Secure SSH")
+	fmt.Println("  [8] Schedule Maintenance")
+	fmt.Println("  [9] System Info")
+	fmt.Println("  [10] Network Benchmark")
+	fmt.Println("  [11] Seal VM for Template (Expert)")
+	fmt.Println("  [12] Check Virtual Hardware")
+	fmt.Println("  [13] Manage Swap")
+	fmt.Println("  [14] Scan Logs for Errors")
+	fmt.Println("  [15] Optimize Docker")
+	fmt.Println("  [16] Safe System Update")
+	fmt.Println("  [0]  Exit")
+	fmt.Println()
+	fmt.Print("Choice (0-16): ")
+
+	var choice string
+	fmt.Scanln(&choice)
+
+	if choice == "0" {
+		return 0
+	}
+	if choice == "2" {
+		return 2
+	}
+	if choice == "3" {
+		return 3
+	}
+	if choice == "4" {
+		return 4
+	}
+	if choice == "5" {
+		return 5
+	}
+	if choice == "6" {
+		return 6
+	}
+	if choice == "7" {
+		return 7
+	}
+	if choice == "8" {
+		return 8
+	}
+	if choice == "9" {
+		return 9
+	}
+	if choice == "10" {
+		return 10
+	}
+	if choice == "11" {
+		return 11
+	}
+	if choice == "12" {
+		return 12
+	}
+	if choice == "13" {
+		return 13
+	}
+	if choice == "14" {
+		return 14
+	}
+	if choice == "15" {
+		return 15
+	}
+	if choice == "16" {
+		return 16
+	}
+	return 1
+}
+
+func runRollbackInteractive() error {
+	PrintStep("Restore Backup")
+
+	backups, err := ListBackups()
+	if err != nil {
+		return fmt.Errorf("failed to list backups: %w", err)
+	}
+
+	if len(backups) == 0 {
+		PrintWarning("No backups found.")
+		return nil
+	}
+
+	fmt.Println("Available backups:")
+	for i, backup := range backups {
+		fmt.Printf("  [%d] %s\n", i+1, backup)
+	}
+	fmt.Println("  [c] Cancel")
+	fmt.Println()
+
+	fmt.Print("Select backup to restore: ")
+	var selection string
+	fmt.Scanln(&selection)
+
+	if selection == "c" || selection == "C" {
+		PrintInfo("Rollback cancelled")
+		return nil
+	}
+
+	var index int
+	_, err = fmt.Sscanf(selection, "%d", &index)
+	if err != nil || index < 1 || index > len(backups) {
+		PrintError("Invalid selection")
+		return nil
+	}
+
+	targetBackup := backups[index-1]
+	backupDir := filepath.Join("/root", ".vmware-tuner-backups", targetBackup)
+	rollbackScript := filepath.Join(backupDir, "rollback.sh")
+
+	if _, err := os.Stat(rollbackScript); os.IsNotExist(err) {
+		return fmt.Errorf("rollback script not found in %s", backupDir)
+	}
+
+	PrintInfo("Executing rollback script from %s...", targetBackup)
+	
+	cmd := exec.Command("/bin/bash", rollbackScript)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin 
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("rollback failed: %w", err)
+	}
+
+	return nil
+}
