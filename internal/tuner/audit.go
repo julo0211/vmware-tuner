@@ -26,9 +26,26 @@ func (at *AuditTuner) RunAudit() error {
 
 	// 1. Check VM Tools (30 points)
 	tools := NewVMToolsTuner(true, at.Distro)
-	if tools.CheckInstalled() {
-		PrintSuccess("VMware Tools installed (+30)")
-		score += 30
+	installed, updateAvailable, days, _ := tools.CheckUpdateStatus()
+	
+	if installed {
+		if !updateAvailable {
+			PrintSuccess("VMware Tools installed and up-to-date (+30)")
+			score += 30
+		} else {
+			// Update available, deduct points based on age
+			points := 25
+			if days > 180 {
+				points = 10
+			} else if days > 90 {
+				points = 15
+			} else if days > 30 {
+				points = 20
+			}
+			PrintWarning("VMware Tools update available (installed %d days ago) (+%d/30)", days, points)
+			PrintInfo("Recommendation: Run 'Safe System Update' or update open-vm-tools")
+			score += points
+		}
 	} else {
 		PrintError("VMware Tools missing (0/30)")
 	}

@@ -2,7 +2,10 @@ package tuner
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
+	"time"
 )
 
 // VMToolsTuner handles open-vm-tools installation and configuration
@@ -82,4 +85,61 @@ func (vt *VMToolsTuner) ensureService() error {
 
 	PrintSuccess("VMware Tools service configured")
 	return nil
+}
+
+// CheckUpdateStatus returns installed, updateAvailable, daysSinceLastUpdate, error
+func (vt *VMToolsTuner) CheckUpdateStatus() (bool, bool, int, error) {
+	if !vt.CheckInstalled() {
+		return false, false, 0, nil
+	}
+
+	// Check binary age
+	binPath, err := exec.LookPath("vmtoolsd")
+	days := 0
+	if err == nil {
+		info, err := os.Stat(binPath)
+		if err == nil {
+			days = int(time.Since(info.ModTime()).Hours() / 24)
+		}
+	}
+
+	// Check for updates
+	updateAvailable := vt.IsUpdateAvailable()
+
+	return true, updateAvailable, days, nil
+}
+
+// IsUpdateAvailable checks if an update is available via package manager
+func (vt *VMToolsTuner) IsUpdateAvailable() bool {
+	// This is a "best effort" check based on local cache
+	if vt.Distro.Type == DistroDebian {
+		// apt-get -s install --only-upgrade open-vm-tools
+		cmd := exec.Command("apt-get", "-s", "install", "--only-upgrade", "open-vm-tools")
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.Contains(string(out), "Inst open-vm-tools") {
+			return true
+		}
+	} else if vt.Distro.Type == DistroRHEL {
+		// yum check-update open-vm-tools
+		// Exit code 100 means updates available
+		cmd := exec.Command("yum", "check-update", "open-vm-tools")
+		err := cmd.Run()
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				if exitError.ExitCode() == 100 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// UpdateTools attempts to update the package
+func (vt *VMToolsTuner) UpdateTools() error {
+	PrintInfo("Updating open-vm-tools...")
+	if err := vt.Distro.InstallPackage("open-vm-tools"); err != nil {
+		return err
+	}
+	return vt.ensureService()
 }
