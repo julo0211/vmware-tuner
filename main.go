@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
@@ -85,134 +86,104 @@ func runTuner(cmd *cobra.Command, args []string) error {
 		!cmd.Flags().Changed("install-tools") &&
 		!cmd.Flags().Changed("debloat") {
 
-		choice := showMainMenu()
-		
 		// Initialize distro manager for all interactive commands
 		distro, err := NewDistroManager()
 		if err != nil {
-			// Fallback if detection fails, though unlikely to work well for disk/audit
+			// Fallback if detection fails
 			distro = &DistroManager{Type: DistroUnknown}
 		}
 
-		if choice == 0 {
-			PrintInfo("Exiting...")
-			return nil
-		}
+		for {
+			choice := showMainMenu()
 
-		if choice == 2 {
-			if err := CheckRoot(); err != nil {
+			if choice == 0 {
+				PrintInfo("Exiting...")
+				return nil
+			}
+
+			var err error
+
+			if choice == 2 {
+				if err = CheckRoot(); err == nil {
+					err = runRollbackInteractive()
+				}
+			} else if choice == 3 {
+				if err = CheckRoot(); err == nil {
+					audit := NewAuditTuner(distro)
+					err = audit.RunAudit()
+				}
+			} else if choice == 4 {
+				if err = CheckRoot(); err == nil {
+					disk := NewDiskTuner(distro)
+					err = disk.ExpandRoot()
+				}
+			} else if choice == 5 {
+				if err = CheckRoot(); err == nil {
+					timeSync := NewTimeSyncTuner(distro)
+					err = timeSync.Run()
+				}
+			} else if choice == 6 {
+				if err = CheckRoot(); err == nil {
+					cleaner := NewCleanerTuner(distro)
+					err = cleaner.Run()
+				}
+			} else if choice == 7 {
+				if err = CheckRoot(); err == nil {
+					backup := NewBackupManager()
+					if err = backup.Initialize(); err == nil {
+						ssh := NewSSHTuner(backup)
+						err = ssh.Run()
+					}
+				}
+			} else if choice == 8 {
+				if err = CheckRoot(); err == nil {
+					cron := NewCronTuner()
+					err = cron.Run()
+				}
+			} else if choice == 9 {
+				info := NewInfoTuner()
+				err = info.Run()
+			} else if choice == 10 {
+				bench := NewBenchmarkTuner()
+				err = bench.Run()
+			} else if choice == 11 {
+				if err = CheckRoot(); err == nil {
+					template := NewTemplateTuner()
+					err = template.Run()
+				}
+			} else if choice == 12 {
+				hardware := NewHardwareTuner(distro)
+				err = hardware.Run()
+			} else if choice == 13 {
+				if err = CheckRoot(); err == nil {
+					swap := NewSwapTuner()
+					err = swap.Run()
+				}
+			} else if choice == 14 {
+				if err = CheckRoot(); err == nil {
+					logDoctor := NewLogDoctorTuner(distro)
+					err = logDoctor.Run()
+				}
+			} else if choice == 15 {
+				if err = CheckRoot(); err == nil {
+					docker := NewDockerTuner()
+					err = docker.Run()
+				}
+			} else if choice == 16 {
+				if err = CheckRoot(); err == nil {
+					update := NewUpdateTuner(distro)
+					err = update.Run()
+				}
+			}
+
+			if err != nil {
 				PrintError("%v", err)
-				return err
 			}
-			return runRollbackInteractive()
-		}
-		if choice == 3 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			audit := NewAuditTuner(distro)
-			return audit.RunAudit()
-		}
-		if choice == 4 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			disk := NewDiskTuner(distro)
-			return disk.ExpandRoot()
-		}
-		if choice == 5 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			timeSync := NewTimeSyncTuner(distro)
-			return timeSync.Run()
-		}
-		if choice == 6 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			cleaner := NewCleanerTuner(distro)
-			return cleaner.Run()
-		}
-		if choice == 7 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			// Need backup manager for SSH
-			backup := NewBackupManager()
-			if err := backup.Initialize(); err != nil {
-				return err
-			}
-			ssh := NewSSHTuner(backup)
-			return ssh.Run()
-		}
-		if choice == 8 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			cron := NewCronTuner()
-			return cron.Run()
-		}
-		if choice == 9 {
-			// No root needed for info strictly speaking, but good for consistency
-			info := NewInfoTuner()
-			return info.Run()
-		}
-		if choice == 10 {
-			// No root needed for benchmark
-			bench := NewBenchmarkTuner()
-			return bench.Run()
-		}
-		if choice == 11 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			template := NewTemplateTuner()
-			return template.Run()
-		}
-		if choice == 12 {
-			// No root needed strictly, but lspci might need it for full info
-			hardware := NewHardwareTuner(distro)
-			return hardware.Run()
-		}
-		if choice == 13 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			swap := NewSwapTuner()
-			return swap.Run()
-		}
-		if choice == 14 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			logDoctor := NewLogDoctorTuner(distro)
-			return logDoctor.Run()
-		}
-		if choice == 15 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			docker := NewDockerTuner()
-			return docker.Run()
-		}
-		if choice == 16 {
-			if err := CheckRoot(); err != nil {
-				PrintError("%v", err)
-				return err
-			}
-			update := NewUpdateTuner(distro)
-			return update.Run()
+
+			fmt.Println()
+			fmt.Println("Press Enter to return to menu...")
+			fmt.Scanln()
+			fmt.Scanln() // Sometimes needed to consume newline
 		}
 	}
 
@@ -506,6 +477,10 @@ func verifyConfig(cmd *cobra.Command, args []string) error {
 }
 
 func showMainMenu() int {
+	// Clear screen (optional, but nice for looping)
+	fmt.Print("\033[H\033[2J")
+	
+	Banner()
 	fmt.Println("What do you want to do?")
 	fmt.Println("  [1] Optimize this VM (Tuning)")
 	fmt.Println("  [2] Restore a backup (Rollback)")
@@ -521,7 +496,14 @@ func showMainMenu() int {
 	fmt.Println("  [12] Check Virtual Hardware")
 	fmt.Println("  [13] Manage Swap")
 	fmt.Println("  [14] Scan Logs for Errors")
-	fmt.Println("  [15] Optimize Docker")
+
+	// Check Docker
+	if _, err := exec.LookPath("docker"); err == nil {
+		fmt.Println("  [15] Optimize Docker")
+	} else {
+		color.Red("  [15] Optimize Docker (Not Installed)")
+	}
+
 	fmt.Println("  [16] Safe System Update")
 	fmt.Println("  [0]  Exit")
 	fmt.Println()
@@ -530,54 +512,22 @@ func showMainMenu() int {
 	var choice string
 	fmt.Scanln(&choice)
 
-	if choice == "0" {
-		return 0
-	}
-	if choice == "2" {
-		return 2
-	}
-	if choice == "3" {
-		return 3
-	}
-	if choice == "4" {
-		return 4
-	}
-	if choice == "5" {
-		return 5
-	}
-	if choice == "6" {
-		return 6
-	}
-	if choice == "7" {
-		return 7
-	}
-	if choice == "8" {
-		return 8
-	}
-	if choice == "9" {
-		return 9
-	}
-	if choice == "10" {
-		return 10
-	}
-	if choice == "11" {
-		return 11
-	}
-	if choice == "12" {
-		return 12
-	}
-	if choice == "13" {
-		return 13
-	}
-	if choice == "14" {
-		return 14
-	}
-	if choice == "15" {
-		return 15
-	}
-	if choice == "16" {
-		return 16
-	}
+	if choice == "0" { return 0 }
+	if choice == "2" { return 2 }
+	if choice == "3" { return 3 }
+	if choice == "4" { return 4 }
+	if choice == "5" { return 5 }
+	if choice == "6" { return 6 }
+	if choice == "7" { return 7 }
+	if choice == "8" { return 8 }
+	if choice == "9" { return 9 }
+	if choice == "10" { return 10 }
+	if choice == "11" { return 11 }
+	if choice == "12" { return 12 }
+	if choice == "13" { return 13 }
+	if choice == "14" { return 14 }
+	if choice == "15" { return 15 }
+	if choice == "16" { return 16 }
 	return 1
 }
 
