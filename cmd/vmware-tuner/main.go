@@ -194,20 +194,6 @@ func runTuner(cmd *cobra.Command, args []string) error {
 	if !dryRun {
 		if err := tuner.CheckRoot(); err != nil {
 			tuner.PrintError("%v", err)
-			return err
-		}
-	}
-
-	// Check if running on VMware
-	tuner.IsVMware, err := tuner.IsVMware()
-	if err != nil {
-		tuner.PrintWarning("Could not determine if running on VMware: %v", err)
-	} else if !tuner.IsVMware {
-		tuner.PrintWarning("This system does not appear to be a VMware VM")
-		tuner.PrintWarning("Tuning parameters are optimized for VMware environments")
-		fmt.Print("\nContinue anyway? (yes/no): ")
-		var response string
-		fmt.Scanln(&response)
 		if response != "yes" {
 			tuner.PrintInfo("Tuning cancelled")
 			return nil
