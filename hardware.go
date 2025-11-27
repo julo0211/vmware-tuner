@@ -57,14 +57,19 @@ func (ht *HardwareTuner) Run() error {
 	// Try installing pciutils if missing? No, read-only check shouldn't install stuff ideally.
 	// Let's try to detect via sysfs or dmesg
 	
-	// Check for vmw_pvscsi module
+	// Check for vmw_pvscsi or nvme module
 	if out, err := exec.Command("lsmod").Output(); err == nil {
-		if strings.Contains(string(out), "vmw_pvscsi") {
+		output := string(out)
+		if strings.Contains(output, "vmw_pvscsi") {
 			PrintSuccess("VMware Paravirtual SCSI (PVSCSI) driver loaded")
+		} else if strings.Contains(output, "nvme") {
+			PrintSuccess("NVMe Controller detected (High Performance)")
+		} else if strings.Contains(output, "mptspi") || strings.Contains(output, "mptsas") {
+			PrintInfo("Detected LSI Logic Controller (Standard)")
+			PrintInfo("Recommendation: Upgrade to VMware Paravirtual (PVSCSI) for better I/O performance")
 		} else {
 			// Check if it's built-in or just not used
-			PrintWarning("PVSCSI driver not found in loaded modules")
-			PrintInfo("Recommendation: Use Paravirtual SCSI controller for high I/O performance")
+			PrintWarning("Optimal Storage Controller not found (PVSCSI/NVMe)")
 		}
 	}
 

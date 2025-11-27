@@ -60,16 +60,46 @@ func (dt *DiskTuner) ExpandRoot() error {
 	
 	if strings.Contains(rootPart, "nvme") {
 		// nvme0n1p2 -> disk=/dev/nvme0n1, part=2
-		// Simplified parsing logic
-		return fmt.Errorf("NVMe drives not yet supported in this version")
+		// Find the last 'p' followed by digits
+		lastP := strings.LastIndex(rootPart, "p")
+		if lastP > 0 && lastP < len(rootPart)-1 {
+			disk = rootPart[:lastP]
+			partNum = rootPart[lastP+1:]
+		} else {
+			return fmt.Errorf("could not parse NVMe partition: %s", rootPart)
+		}
 	} else {
 		// /dev/sda2
 		// Very basic parsing, assumes single digit partition for now
-		if len(rootPart) < 4 {
+		// Better: find last digit sequence
+		lastDigitIdx := -1
+		for i := len(rootPart) - 1; i >= 0; i-- {
+			if rootPart[i] >= '0' && rootPart[i] <= '9' {
+				lastDigitIdx = i
+			} else {
+				break
+			}
+		}
+		
+		if lastDigitIdx == -1 {
 			return fmt.Errorf("unsupported partition format: %s", rootPart)
 		}
-		disk = rootPart[:len(rootPart)-1] // /dev/sda
-		partNum = rootPart[len(rootPart)-1:] // 2
+		
+		// If the partition ends with digits, split there.
+		// Actually, for /dev/sda2, we want to split at the last non-digit.
+		// Let's stick to the simple logic for sdX for now but make it slightly more robust
+		// Find where the digits start at the end
+		i := len(rootPart) - 1
+		for i >= 0 && (rootPart[i] >= '0' && rootPart[i] <= '9') {
+			i--
+		}
+		// i is now the index of the last non-digit char (e.g. 'a' in sda2)
+		if i < 0 || i == len(rootPart)-1 {
+			return fmt.Errorf("unsupported partition format: %s", rootPart)
+		}
+		
+		disk = rootPart[:i+1]
+		partNum = rootPart[i+1:]
 	}
 
 	PrintInfo("Target Disk: %s, Partition: %s", disk, partNum)

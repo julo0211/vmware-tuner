@@ -32,14 +32,14 @@ Wants=network-online.target
 Type=oneshot
 RemainOnExit=yes
 
-# Increase ring buffers for vmxnet3 interfaces
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; done'
+# Increase ring buffers (ONLY for vmxnet3 to avoid e1000 hangs)
+ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; fi; done'
 
-# Enable hardware offloading features
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do ethtool -K $iface gso on gro on tso on 2>/dev/null || true; done'
+# Enable hardware offloading features (ONLY for vmxnet3)
+ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -K $iface gso on gro on tso on 2>/dev/null || true; fi; done'
 
-# Set interrupt coalescing for better latency
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; done'
+# Set interrupt coalescing (ONLY for vmxnet3)
+ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; fi; done'
 
 [Install]
 WantedBy=multi-user.target
