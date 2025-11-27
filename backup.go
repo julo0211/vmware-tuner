@@ -213,3 +213,25 @@ func ListBackups() ([]string, error) {
 
 	return backups, nil
 }
+
+// BackupServices saves a list of disabled services
+func (bm *BackupManager) BackupServices(services []string) error {
+	if len(services) == 0 {
+		return nil
+	}
+
+	filePath := filepath.Join(bm.BackupDir, "services.txt")
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create services backup: %w", err)
+	}
+	defer file.Close()
+
+	for _, svc := range services {
+		if _, err := file.WriteString(svc + "\n"); err != nil {
+			return fmt.Errorf("failed to write service to backup: %w", err)
+		}
+	}
+
+	return nil
+}
