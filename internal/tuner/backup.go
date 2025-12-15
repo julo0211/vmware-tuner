@@ -118,10 +118,17 @@ if [ -f "grub" ]; then
     echo "  - /etc/default/grub"
 fi
 if [ -f "99-vmware-performance.conf" ]; then
-    echo "  - /etc/sysctl.d/99-vmware-performance.conf"
+    echo "  - /etc/sysctl.d/99-vmware-performance.conf (Restore Backup)"
+elif [ -f "/etc/sysctl.d/99-vmware-performance.conf" ]; then
+    echo "  - /etc/sysctl.d/99-vmware-performance.conf (Delete Created File)"
 fi
 if [ -f "60-scheduler.rules" ]; then
-    echo "  - /etc/udev/rules.d/60-scheduler.rules"
+    echo "  - /etc/udev/rules.d/60-scheduler.rules (Restore Backup)"
+elif [ -f "/etc/udev/rules.d/60-scheduler.rules" ]; then
+    echo "  - /etc/udev/rules.d/60-scheduler.rules (Delete Created File)"
+fi
+if [ -f "/etc/systemd/system/network-tuning.service" ]; then
+    echo "  - /etc/systemd/system/network-tuning.service (Delete Service)"
 fi
 
 echo ""
@@ -146,18 +153,39 @@ if [ -f "grub" ]; then
     echo "✓ Restored /etc/default/grub (grub updated)"
 fi
 
+
 if [ -f "99-vmware-performance.conf" ]; then
     rm -f /etc/sysctl.d/99-vmware-performance.conf
-    echo "✓ Removed /etc/sysctl.d/99-vmware-performance.conf"
+    cp -v 99-vmware-performance.conf /etc/sysctl.d/99-vmware-performance.conf
+    echo "✓ Restored /etc/sysctl.d/99-vmware-performance.conf"
+    sysctl --system
+    echo "✓ Reloaded sysctl configuration"
+elif [ -f "/etc/sysctl.d/99-vmware-performance.conf" ]; then
+    rm -f /etc/sysctl.d/99-vmware-performance.conf
+    echo "✓ Removed /etc/sysctl.d/99-vmware-performance.conf (Created by tuner)"
     sysctl --system
     echo "✓ Reloaded sysctl configuration"
 fi
 
 if [ -f "60-scheduler.rules" ]; then
     rm -f /etc/udev/rules.d/60-scheduler.rules
+    cp -v 60-scheduler.rules /etc/udev/rules.d/60-scheduler.rules
+    echo "✓ Restored /etc/udev/rules.d/60-scheduler.rules"
     udevadm control --reload-rules
-    echo "✓ Removed /etc/udev/rules.d/60-scheduler.rules"
-    echo "✓ Removed /etc/udev/rules.d/60-scheduler.rules"
+    echo "✓ Reloaded udev rules"
+elif [ -f "/etc/udev/rules.d/60-scheduler.rules" ]; then
+    rm -f /etc/udev/rules.d/60-scheduler.rules
+    echo "✓ Removed /etc/udev/rules.d/60-scheduler.rules (Created by tuner)"
+    udevadm control --reload-rules
+    echo "✓ Reloaded udev rules"
+fi
+
+# Network Service Cleanup
+if [ -f "/etc/systemd/system/network-tuning.service" ]; then
+    systemctl disable --now network-tuning.service 2>/dev/null || true
+    rm -f /etc/systemd/system/network-tuning.service
+    echo "✓ Removed /etc/systemd/system/network-tuning.service"
+    systemctl daemon-reload
 fi
 
 if [ -f "services.txt" ]; then
