@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
@@ -15,13 +17,13 @@ import (
 )
 
 var (
-	version = "1.0.0"
-	dryRun  bool
-	noGrub  bool
-	noSysctl bool
-	noFstab bool
-	noIO    bool
-	noNet   bool
+	version      = "1.0.0"
+	dryRun       bool
+	noGrub       bool
+	noSysctl     bool
+	noFstab      bool
+	noIO         bool
+	noNet        bool
 	installTools bool
 	doDebloat    bool
 )
@@ -97,98 +99,133 @@ func runTuner(cmd *cobra.Command, args []string) error {
 			distro = &tuner.DistroManager{Type: tuner.DistroUnknown}
 		}
 
-		for {
-			choice := showMainMenu()
+		// Define Menu Options
+		type MenuOption struct {
+			Label       string
+			Action      func() error
+			RequireRoot bool
+		}
 
-			if choice == 0 {
+		menu := map[int]MenuOption{
+			1: {"Optimize this VM (Tuning)", func() error {
+				// The main tuning logic is slightly complex to wrap in a simple lambda without arguments from flags
+				// But we can just call a function that sets defaults or uses the interactive mode flags (we probably need separate flags for interactive?)
+				// For now, let's keep the interactive tuning logic here or extract it?
+				// To keep it clean, let's call a new function runInteractiveTuning(distro)?
+				// Or actually, the original code had the "Determine what will be tuned" block AFTER the loop.
+				// Wait, the original code had the loop return 1 ("Exit to main logic") or 0 ("Exit program").
+				// If it returned 1 it fell through to the main tuning logic.
+				// This implies Option 1 "Optimize this VM" actually exits the loop and lets the rest of main() run.
+				return fmt.Errorf("EXIT_TO_TUNE") // Special signal to break loop and continue to tuning
+			}, true},
+			2: {"Restore a backup (Rollback)", runRollbackInteractive, true},
+			3: {"Audit System (Score)", func() error { return tuner.NewAuditTuner(distro).RunAudit() }, true},
+			4: {"Expand Disk", func() error { return tuner.NewDiskTuner(distro).ExpandRoot() }, true},
+			5: {"Fix Time Sync", func() error { return tuner.NewTimeSyncTuner(distro).Run() }, true},
+			6: {"Clean System", func() error { return tuner.NewCleanerTuner(distro).Run() }, true},
+			7: {"Secure SSH", func() error {
+				backup := tuner.NewBackupManager()
+				if err := backup.Initialize(); err != nil {
+					return err
+				}
+				return tuner.NewSSHTuner(backup).Run()
+			}, true},
+			8:  {"Schedule Maintenance", func() error { return tuner.NewCronTuner().Run() }, true},
+			9:  {"System Info", func() error { return tuner.NewInfoTuner().Run() }, false},
+			10: {"Network Benchmark", func() error { return tuner.NewBenchmarkTuner().Run() }, false},
+			11: {"Seal VM for Template (Expert)", func() error { return tuner.NewTemplateTuner().Run() }, true},
+			12: {"Check Virtual Hardware", func() error { return tuner.NewHardwareTuner(distro).Run() }, false},
+			13: {"Manage Swap", func() error { return tuner.NewSwapTuner().Run() }, true},
+			14: {"Scan Logs for Errors", func() error { return tuner.NewLogDoctorTuner(distro).Run() }, true},
+			// 15 is dynamic (Docker)
+			16: {"Safe System Update", func() error { return tuner.NewUpdateTuner(distro).Run() }, true},
+		}
+
+		// Add Docker option if installed
+		if _, err := exec.LookPath("docker"); err == nil {
+			menu[15] = MenuOption{"Optimize Docker", func() error { return tuner.NewDockerTuner().Run() }, true}
+		} else {
+			// We can choose to show it disabled or not show it. The original showed it in red.
+			// The map approach makes it harder to show "disabled" options in specific colors unless we handle it in printing.
+			// Let's stick to adding it only if installed for cleaner menu, OR wrap printing logic.
+			// The user wanted "Command pattern", I'll stick to a clean valid map.
+		}
+
+		for {
+			tuner.Banner()
+			fmt.Println("What do you want to do?")
+
+			// Print menu items in order
+			var keys []int
+			for k := range menu {
+				keys = append(keys, k)
+			}
+			sort.Ints(keys)
+
+			for _, k := range keys {
+				fmt.Printf("  [%d] %s\n", k, menu[k].Label)
+			}
+			if _, err := exec.LookPath("docker"); err != nil {
+				color.Red("  [15] Optimize Docker (Not Installed)")
+			}
+			fmt.Println("  [0]  Exit")
+			fmt.Println()
+			fmt.Print("Choice: ")
+
+			reader := bufio.NewReader(os.Stdin)
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+
+			if input == "0" {
 				tuner.PrintInfo("Exiting...")
 				return nil
 			}
 
-			var err error
+			choice, err := strconv.Atoi(input)
+			if err != nil || choice < 0 {
+				tuner.PrintError("Invalid choice")
+				tuner.Pause()
+				continue
+			}
 
-			if choice == 2 {
-				if err = tuner.CheckRoot(); err == nil {
-					err = runRollbackInteractive()
+			option, exists := menu[choice]
+			if !exists {
+				tuner.PrintError("Invalid choice")
+				tuner.Pause()
+				continue
+			}
+
+			if option.RequireRoot {
+				if err := tuner.CheckRoot(); err != nil {
+					tuner.PrintError("%v", err)
+					tuner.Pause()
+					continue
 				}
-			} else if choice == 3 {
-				if err = tuner.CheckRoot(); err == nil {
-					audit := tuner.NewAuditTuner(distro)
-					err = audit.RunAudit()
-				}
-			} else if choice == 4 {
-				if err = tuner.CheckRoot(); err == nil {
-					disk := tuner.NewDiskTuner(distro)
-					err = disk.ExpandRoot()
-				}
-			} else if choice == 5 {
-				if err = tuner.CheckRoot(); err == nil {
-					timeSync := tuner.NewTimeSyncTuner(distro)
-					err = timeSync.Run()
-				}
-			} else if choice == 6 {
-				if err = tuner.CheckRoot(); err == nil {
-					cleaner := tuner.NewCleanerTuner(distro)
-					err = cleaner.Run()
-				}
-			} else if choice == 7 {
-				if err = tuner.CheckRoot(); err == nil {
-					backup := tuner.NewBackupManager()
-					if err = backup.Initialize(); err == nil {
-						ssh := tuner.NewSSHTuner(backup)
-						err = ssh.Run()
-					}
-				}
-			} else if choice == 8 {
-				if err = tuner.CheckRoot(); err == nil {
-					cron := tuner.NewCronTuner()
-					err = cron.Run()
-				}
-			} else if choice == 9 {
-				info := tuner.NewInfoTuner()
-				err = info.Run()
-			} else if choice == 10 {
-				bench := tuner.NewBenchmarkTuner()
-				err = bench.Run()
-			} else if choice == 11 {
-				if err = tuner.CheckRoot(); err == nil {
-					template := tuner.NewTemplateTuner()
-					err = template.Run()
-				}
-			} else if choice == 12 {
-				hardware := tuner.NewHardwareTuner(distro)
-				err = hardware.Run()
-			} else if choice == 13 {
-				if err = tuner.CheckRoot(); err == nil {
-					swap := tuner.NewSwapTuner()
-					err = swap.Run()
-				}
-			} else if choice == 14 {
-				if err = tuner.CheckRoot(); err == nil {
-					logDoctor := tuner.NewLogDoctorTuner(distro)
-					err = logDoctor.Run()
-				}
-			} else if choice == 15 {
-				if err = tuner.CheckRoot(); err == nil {
-					docker := tuner.NewDockerTuner()
-					err = docker.Run()
-				}
-			} else if choice == 16 {
-				if err = tuner.CheckRoot(); err == nil {
-					update := tuner.NewUpdateTuner(distro)
-					err = update.Run()
-				}
+			}
+
+			err = option.Action()
+
+			// Check for special exit signal
+			if err != nil && err.Error() == "EXIT_TO_TUNE" {
+				break // Break loop to continue to main tuning logic
 			}
 
 			if err != nil {
 				tuner.PrintError("%v", err)
 			}
 
-			fmt.Println()
-			fmt.Println("Press Enter to return to menu...")
-			bufio.NewReader(os.Stdin).ReadBytes('\n')
+			tuner.Pause()
+
+			// Clear screen for next iteration
+			fmt.Print("\033[H\033[2J")
 		}
 	}
+
+	// ... (Rest of the function: Tuning Logic) ...
+	// Since I cannot allow duplicate code and "runTuner" continues, I will return the rest of the function here
+	// But `replace_file_content` replaces a block. I need to be careful not to delete the tuning logic below if I don't include it.
+	// The original code had the tuning logic AFTER the loop.
+	// My replacement ends at the loop end.
 
 	// Check if running as root
 	if !dryRun {
@@ -199,7 +236,7 @@ func runTuner(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if running on VMware
-	isVMware, err := tuner.IsVMware()
+	isVMware, err := tuner.IsVMware("")
 	if err != nil {
 		tuner.PrintWarning("Could not determine if running on VMware: %v", err)
 	} else if !isVMware {
@@ -379,7 +416,7 @@ func runTuner(cmd *cobra.Command, args []string) error {
 
 	if !dryRun {
 		tuner.CompletionMessage(rebootRequired)
-		
+
 		if rebootRequired {
 			fmt.Print("Do you want to reboot now? (y/n): ")
 			var response string
@@ -479,62 +516,6 @@ func verifyConfig(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func showMainMenu() int {
-	// Clear screen (optional, but nice for looping)
-	fmt.Print("\033[H\033[2J")
-	
-	tuner.Banner()
-	fmt.Println("What do you want to do?")
-	fmt.Println("  [1] Optimize this VM (Tuning)")
-	fmt.Println("  [2] Restore a backup (Rollback)")
-	fmt.Println("  [3] Audit System (Score)")
-	fmt.Println("  [4] Expand Disk")
-	fmt.Println("  [5] Fix Time Sync")
-	fmt.Println("  [6] Clean System")
-	fmt.Println("  [7] Secure SSH")
-	fmt.Println("  [8] Schedule Maintenance")
-	fmt.Println("  [9] System Info")
-	fmt.Println("  [10] Network Benchmark")
-	fmt.Println("  [11] Seal VM for Template (Expert)")
-	fmt.Println("  [12] Check Virtual Hardware")
-	fmt.Println("  [13] Manage Swap")
-	fmt.Println("  [14] Scan Logs for Errors")
-
-	// Check Docker
-	if _, err := exec.LookPath("docker"); err == nil {
-		fmt.Println("  [15] Optimize Docker")
-	} else {
-		color.Red("  [15] Optimize Docker (Not Installed)")
-	}
-
-	fmt.Println("  [16] Safe System Update")
-	fmt.Println("  [0]  Exit")
-	fmt.Println()
-	fmt.Print("Choice (0-16): ")
-
-	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
-	choice := strings.TrimSpace(input)
-
-	if choice == "0" { return 0 }
-	if choice == "2" { return 2 }
-	if choice == "3" { return 3 }
-	if choice == "4" { return 4 }
-	if choice == "5" { return 5 }
-	if choice == "6" { return 6 }
-	if choice == "7" { return 7 }
-	if choice == "8" { return 8 }
-	if choice == "9" { return 9 }
-	if choice == "10" { return 10 }
-	if choice == "11" { return 11 }
-	if choice == "12" { return 12 }
-	if choice == "13" { return 13 }
-	if choice == "14" { return 14 }
-	if choice == "15" { return 15 }
-	if choice == "16" { return 16 }
-	return 1
-}
-
 func runRollbackInteractive() error {
 	tuner.PrintStep("Restore Backup")
 
@@ -580,11 +561,11 @@ func runRollbackInteractive() error {
 	}
 
 	tuner.PrintInfo("Executing rollback script from %s...", targetBackup)
-	
+
 	cmd := exec.Command("/bin/bash", rollbackScript)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin 
+	cmd.Stdin = os.Stdin
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rollback failed: %w", err)

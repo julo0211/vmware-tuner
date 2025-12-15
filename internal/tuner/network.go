@@ -180,3 +180,48 @@ func (nt *NetworkTuner) Verify() error {
 
 	return nil
 }
+
+// CheckPacketDrops checks for packet drops on all interfaces using ethtool -S
+func (nt *NetworkTuner) CheckPacketDrops() error {
+	PrintStep("Checking for network packet drops")
+
+	interfaces, err := nt.getNetworkInterfaces()
+	if err != nil {
+		return err
+	}
+
+	for _, iface := range interfaces {
+		fmt.Printf("Interface: %s\n", iface)
+
+		// Use RunCommandSilent from exec_utils (we need to export it or duplicate logic if not exported?
+		// Actually I added RunCommandSilent to generic package, let's check if I can use it.
+		// It is in the same package 'tuner', so yes.)
+		output, err := RunCommandSilent("ethtool", "-S", iface)
+		if err != nil {
+			PrintWarning("  Could not get statistics: %v", err)
+			continue
+		}
+
+		lines := strings.Split(output, "\n")
+		dropsFound := false
+		for _, line := range lines {
+			// Look for drop or error keywords
+			if strings.Contains(line, "drop") || strings.Contains(line, "error") {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					// format usually: "rx_dropped: 123"
+					valStr := parts[len(parts)-1]
+					if valStr != "0" {
+						PrintWarning("  %s", strings.TrimSpace(line))
+						dropsFound = true
+					}
+				}
+			}
+		}
+
+		if !dropsFound {
+			PrintSuccess("  No packet drops or errors detected")
+		}
+	}
+	return nil
+}

@@ -3,6 +3,8 @@ package tuner
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -73,50 +75,39 @@ func FileExists(path string) bool {
 }
 
 // IsVMware checks if running on VMware
-func IsVMware() (bool, error) {
+// fsRoot can be used for testing (e.g. pointing to a temp dir)
+func IsVMware(fsRoot string) (bool, error) {
 	// Check DMI product name
-	data, err := os.ReadFile("/sys/class/dmi/id/product_name")
+	dmiPath := filepath.Join(fsRoot, "/sys/class/dmi/id/product_name")
+	data, err := os.ReadFile(dmiPath)
 	if err == nil {
 		productName := string(data)
-		if contains(productName, "VMware") {
+		if strings.Contains(productName, "VMware") {
 			return true, nil
 		}
 	}
 
 	// Check for VMware in /proc/cpuinfo
-	data, err = os.ReadFile("/proc/cpuinfo")
+	cpuInfoPath := filepath.Join(fsRoot, "/proc/cpuinfo")
+	data, err = os.ReadFile(cpuInfoPath)
 	if err == nil {
 		cpuInfo := string(data)
-		if contains(cpuInfo, "VMware") || contains(cpuInfo, "hypervisor") {
+		if strings.Contains(cpuInfo, "VMware") || strings.Contains(cpuInfo, "hypervisor") {
 			return true, nil
 		}
 	}
 
 	// Check for vmware modules
-	data, err = os.ReadFile("/proc/modules")
+	modulesPath := filepath.Join(fsRoot, "/proc/modules")
+	data, err = os.ReadFile(modulesPath)
 	if err == nil {
 		modules := string(data)
-		if contains(modules, "vmw_") || contains(modules, "vmxnet") {
+		if strings.Contains(modules, "vmw_") || strings.Contains(modules, "vmxnet") {
 			return true, nil
 		}
 	}
 
 	return false, nil
-}
-
-// contains checks if a string contains a substring (case-insensitive)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && containsHelper(s, substr)))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // Banner prints the application banner
