@@ -50,7 +50,7 @@ The tool provides a unified interactive menu with **16 modules**:
 Download the latest release for your architecture (usually `amd64`).
 
 ```bash
-wget https://github.com/julo0211/vmware-tuner/releases/latest/download/vmware-tuner
+wget -O vmware-tuner https://github.com/julo0211/vmware-tuner/releases/latest/download/vmware-tuner-linux-amd64
 chmod +x vmware-tuner
 sudo ./vmware-tuner
 ```
