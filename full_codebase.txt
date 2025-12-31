@@ -1,0 +1,4409 @@
+
+
+========================================
+File: main.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\cmd\vmware-tuner\main.go
+========================================
+
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+
+	"vmware-tuner/internal/tuner"
+)
+
+var (
+	version      = "1.1.0-enterprise"
+	dryRun       bool
+	noGrub       bool
+	noSysctl     bool
+	noFstab      bool
+	noIO         bool
+	noNet        bool
+	installTools bool
+	doDebloat    bool
+)
+
+func main() {
+	var rootCmd = &cobra.Command{
+		Use:   "vmware-tuner",
+		Short: "VMware VM Performance Tuning Tool (Enterprise Edition)",
+		Long: `VMware VM Performance Tuner (Enterprise)
+
+A comprehensive tool to optimize VMware virtual machines for maximum performance.
+Optimized for Air-gapped and Enterprise environments.
+
+Features:
+  - Connectivty-aware (Offline Mode)
+  - Native JSON Parsing for Disk Operations
+  - Native Manifest-based Rollback (No scripts)
+  - Proxy Support (HTTP_PROXY)
+`,
+		Version: version,
+		RunE:    runTuner,
+	}
+
+	var showCmd = &cobra.Command{
+		Use:   "show",
+		Short: "Show current system configuration",
+		Long:  "Display current system settings for all tuning categories",
+		RunE:  showConfig,
+	}
+
+	var verifyCmd = &cobra.Command{
+		Use:   "verify",
+		Short: "Verify tuning has been applied",
+		Long:  "Check if tuning configurations are present on the system",
+		RunE:  verifyConfig,
+	}
+
+	// Root command flags
+	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without making changes")
+	rootCmd.Flags().BoolVar(&noGrub, "no-grub", false, "Skip GRUB boot parameter tuning")
+	rootCmd.Flags().BoolVar(&noSysctl, "no-sysctl", false, "Skip sysctl parameter tuning")
+	rootCmd.Flags().BoolVar(&noFstab, "no-fstab", false, "Skip fstab optimization")
+	rootCmd.Flags().BoolVar(&noIO, "no-io", false, "Skip I/O scheduler tuning")
+	rootCmd.Flags().BoolVar(&noNet, "no-network", false, "Skip network tuning")
+	rootCmd.Flags().BoolVar(&installTools, "install-tools", true, "Install open-vm-tools if missing")
+	rootCmd.Flags().BoolVar(&doDebloat, "debloat", false, "Disable unnecessary services (Server Slim)")
+
+	rootCmd.AddCommand(showCmd)
+	rootCmd.AddCommand(verifyCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func runTuner(cmd *cobra.Command, args []string) error {
+	tuner.Banner()
+
+	// 1. Check Connectivity
+	tuner.PrintStep("Connectivity Check")
+	hasInternet := tuner.CheckConnectivity()
+	if hasInternet {
+		tuner.PrintSuccess("Mode: Connecté (Internet accessible)")
+	} else {
+		tuner.PrintWarning("Mode: Hors-Ligne (Pas d'accès Internet détecté)")
+		tuner.PrintInfo("Certaines fonctionnalités nécessitant internet seront désactivées.")
+	}
+	fmt.Println()
+
+	// Check if running interactively (no flags)
+	if !cmd.Flags().Changed("dry-run") &&
+		!cmd.Flags().Changed("no-grub") &&
+		!cmd.Flags().Changed("no-sysctl") &&
+		!cmd.Flags().Changed("no-fstab") &&
+		!cmd.Flags().Changed("no-io") &&
+		!cmd.Flags().Changed("no-network") &&
+		!cmd.Flags().Changed("install-tools") &&
+		!cmd.Flags().Changed("debloat") {
+
+		// Initialize distro manager for all interactive commands
+		distro, err := tuner.NewDistroManager()
+		if err != nil {
+			// Fallback if detection fails
+			distro = &tuner.DistroManager{Type: tuner.DistroUnknown}
+		}
+
+		// Define Menu Options
+		type MenuOption struct {
+			Label       string
+			Action      func() error
+			RequireRoot bool
+		}
+
+		menu := map[int]MenuOption{
+			1: {"Optimize this VM (Tuning)", func() error {
+				return fmt.Errorf("EXIT_TO_TUNE") // Special signal to break loop and continue to tuning
+			}, true},
+			2: {"Restore a backup (Rollback)", runRollbackInteractive, true},
+			3: {"Audit System (Score)", func() error { return tuner.NewAuditTuner(distro).RunAudit() }, true},
+			4: {"Expand Disk", func() error { return tuner.NewDiskTuner(distro).ExpandRoot() }, true},
+			5: {"Fix Time Sync", func() error { return tuner.NewTimeSyncTuner(distro).Run() }, true},
+			6: {"Clean System", func() error { return tuner.NewCleanerTuner(distro).Run() }, true},
+			7: {"Secure SSH", func() error {
+				backup := tuner.NewBackupManager()
+				if err := backup.Initialize(); err != nil {
+					return err
+				}
+				return tuner.NewSSHTuner(backup).Run()
+			}, true},
+			8:  {"Schedule Maintenance", func() error { return tuner.NewCronTuner().Run() }, true},
+			9:  {"System Info", func() error { return tuner.NewInfoTuner().Run() }, false},
+			10: {"Network Benchmark", func() error { return tuner.NewBenchmarkTuner().Run() }, false},
+			11: {"Seal VM for Template (Expert)", func() error { return tuner.NewTemplateTuner().Run() }, true},
+			12: {"Check Virtual Hardware", func() error { return tuner.NewHardwareTuner(distro).Run() }, false},
+			13: {"Manage Swap", func() error { return tuner.NewSwapTuner().Run() }, true},
+			14: {"Scan Logs for Errors", func() error { return tuner.NewLogDoctorTuner(distro).Run() }, true},
+			// 15 is dynamic (Docker)
+			// 16 Updated for connectivity awareness
+			16: {"Safe System Update", func() error {
+				return tuner.NewUpdateTuner(distro).Run(hasInternet)
+			}, true},
+		}
+
+		// Add Docker option if installed
+		if _, err := exec.LookPath("docker"); err == nil {
+			menu[15] = MenuOption{"Optimize Docker", func() error { return tuner.NewDockerTuner().Run() }, true}
+		}
+
+		for {
+			tuner.Banner()
+			fmt.Println("What do you want to do?")
+
+			// Print menu items in order
+			var keys []int
+			for k := range menu {
+				keys = append(keys, k)
+			}
+			sort.Ints(keys)
+
+			for _, k := range keys {
+				fmt.Printf("  [%d] %s\n", k, menu[k].Label)
+			}
+			if _, err := exec.LookPath("docker"); err != nil {
+				color.Red("  [15] Optimize Docker (Not Installed)")
+			}
+			fmt.Println("  [0]  Exit")
+			fmt.Println()
+			fmt.Print("Choice: ")
+
+			reader := bufio.NewReader(os.Stdin)
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+
+			if input == "0" {
+				tuner.PrintInfo("Exiting...")
+				return nil
+			}
+
+			choice, err := strconv.Atoi(input)
+			if err != nil || choice < 0 {
+				tuner.PrintError("Invalid choice")
+				tuner.Pause()
+				continue
+			}
+
+			option, exists := menu[choice]
+			if !exists {
+				tuner.PrintError("Invalid choice")
+				tuner.Pause()
+				continue
+			}
+
+			if option.RequireRoot {
+				if err := tuner.CheckRoot(); err != nil {
+					tuner.PrintError("%v", err)
+					tuner.Pause()
+					continue
+				}
+			}
+
+			err = option.Action()
+
+			// Check for special exit signal
+			if err != nil && err.Error() == "EXIT_TO_TUNE" {
+				break // Break loop and continue to main tuning logic
+			}
+
+			if err != nil {
+				tuner.PrintError("%v", err)
+			}
+
+			tuner.Pause()
+
+			// Clear screen for next iteration
+			fmt.Print("\033[H\033[2J")
+		}
+	}
+
+	// --- TUNING LOGIC ---
+
+	// Check if running as root
+	if !dryRun {
+		if err := tuner.CheckRoot(); err != nil {
+			tuner.PrintError("%v", err)
+			return err
+		}
+	}
+
+	// Check if running on VMware
+	isVMware, err := tuner.IsVMware("")
+	if err != nil {
+		tuner.PrintWarning("Could not determine if running on VMware: %v", err)
+	} else if !isVMware {
+		tuner.PrintWarning("This system does not appear to be a VMware VM")
+		tuner.PrintWarning("Tuning parameters are optimized for VMware environments")
+		fmt.Print("\nContinue anyway? (yes/no): ")
+		var response string
+		fmt.Scanln(&response)
+		if response != "yes" {
+			tuner.PrintInfo("Tuning cancelled")
+			return nil
+		}
+	} else {
+		tuner.PrintSuccess("Detected VMware virtual machine")
+	}
+
+	// Initialize distro manager
+	distro, err := tuner.NewDistroManager()
+	if err != nil {
+		tuner.PrintWarning("Could not detect distribution: %v", err)
+		// Continue with default/unknown
+		distro = &tuner.DistroManager{Type: tuner.DistroUnknown}
+	} else {
+		tuner.PrintSuccess("Detected distribution: %s", distro.Name)
+	}
+
+	// Check and install dependencies
+	if !dryRun && !noNet {
+		if err := distro.InstallPackage("ethtool"); err != nil {
+			tuner.PrintWarning("Failed to install ethtool: %v", err)
+			tuner.PrintWarning("Network tuning might fail")
+		}
+	}
+
+	// Determine what will be tuned
+	var modules []string
+	if !noGrub {
+		modules = append(modules, "GRUB boot parameters")
+	}
+	if !noSysctl {
+		modules = append(modules, "Sysctl kernel parameters")
+	}
+	if !noFstab {
+		modules = append(modules, "Filesystem mount options")
+	}
+	if !noIO {
+		modules = append(modules, "I/O scheduler configuration")
+	}
+	if !noNet {
+		modules = append(modules, "Network interface optimization")
+	}
+	if installTools {
+		modules = append(modules, "VMware Tools verification/installation")
+	}
+	if doDebloat {
+		modules = append(modules, "Server Slim (disable unused services)")
+	}
+
+	if len(modules) == 0 {
+		tuner.PrintError("No tuning modules selected")
+		return fmt.Errorf("nothing to do")
+	}
+
+	tuner.Summary(modules)
+
+	if dryRun {
+		tuner.PrintInfo("DRY RUN MODE - No changes will be made")
+		fmt.Println()
+	} else {
+		fmt.Print("Continue with tuning? (yes/no): ")
+		var response string
+		fmt.Scanln(&response)
+		if response != "yes" {
+			tuner.PrintInfo("Tuning cancelled")
+			return nil
+		}
+	}
+
+	// Initialize backup manager
+	backup := tuner.NewBackupManager()
+	if !dryRun {
+		if err := backup.Initialize(); err != nil {
+			tuner.PrintError("Failed to initialize backup: %v", err)
+			return err
+		}
+		tuner.PrintSuccess("Backup directory created: %s", backup.BackupDir)
+	}
+
+	rebootRequired := false
+
+	// Apply GRUB tuning
+	if !noGrub {
+		grub := tuner.NewGrubTuner(dryRun, distro)
+		if err := grub.Apply(backup); err != nil {
+			tuner.PrintError("GRUB tuning failed: %v", err)
+		} else {
+			rebootRequired = true
+		}
+	}
+
+	// Apply sysctl tuning
+	if !noSysctl {
+		sysctl := tuner.NewSysctlTuner(dryRun)
+		if err := sysctl.Apply(backup); err != nil {
+			tuner.PrintError("Sysctl tuning failed: %v", err)
+		}
+	}
+
+	// Apply fstab tuning
+	if !noFstab {
+		fstab := tuner.NewFstabTuner(dryRun)
+		if err := fstab.Apply(backup); err != nil {
+			tuner.PrintError("Fstab tuning failed: %v", err)
+		}
+	}
+
+	// Apply I/O scheduler tuning
+	if !noIO {
+		scheduler := tuner.NewSchedulerTuner(dryRun)
+		if err := scheduler.Apply(backup); err != nil {
+			tuner.PrintError("I/O scheduler tuning failed: %v", err)
+		}
+	}
+
+	// Apply network tuning
+	if !noNet {
+		network := tuner.NewNetworkTuner(dryRun)
+		if err := network.Apply(backup); err != nil {
+			tuner.PrintError("Network tuning failed: %v", err)
+		}
+	}
+
+	// Apply VM Tools
+	if installTools {
+		tools := tuner.NewVMToolsTuner(dryRun, distro)
+		// Pass connectivity status to Apply
+		if err := tools.Apply(hasInternet); err != nil {
+			tuner.PrintError("VM Tools tuning failed: %v", err)
+		}
+	}
+
+	// Apply Debloat (Interactive or Flag)
+	debloat := tuner.NewDebloatTuner(dryRun)
+	if doDebloat {
+		// Flag provided: do it automatically
+		if err := debloat.Apply(backup); err != nil {
+			tuner.PrintError("Debloat failed: %v", err)
+		}
+	} else if !dryRun {
+		// No flag: ask interactively
+		services := debloat.GetBloatServices()
+		if len(services) > 0 {
+			tuner.PrintStep("Server Slim Mode (Optional)")
+			tuner.PrintInfo("Found %d services that are usually unnecessary on servers:", len(services))
+			for _, svc := range services {
+				fmt.Printf("  - %s: %s\n", svc.Name, svc.Description)
+			}
+			fmt.Println()
+			fmt.Print("Do you want to disable these services? (y/n): ")
+			var response string
+			fmt.Scanln(&response)
+			if response == "y" || response == "yes" {
+				if err := debloat.DisableServices(services, backup); err != nil {
+					tuner.PrintError("Debloat failed: %v", err)
+				}
+			} else {
+				tuner.PrintInfo("Skipping Server Slim optimization")
+			}
+		}
+	}
+
+	// Create rollback script (REMOVED - using manifest)
+	// if !dryRun {
+	// 	if err := backup.CreateRollbackScript(); err != nil {
+	// 		tuner.PrintWarning("Failed to create rollback script: %v", err)
+	// 	}
+	// }
+
+	if !dryRun {
+		tuner.CompletionMessage(rebootRequired)
+
+		if rebootRequired {
+			fmt.Print("Do you want to reboot now? (y/n): ")
+			var response string
+			fmt.Scanln(&response)
+			if response == "y" || response == "yes" {
+				tuner.PrintInfo("Rebooting system...")
+				exec.Command("reboot").Run()
+			} else {
+				tuner.PrintInfo("Please remember to reboot later")
+			}
+		}
+	} else {
+		fmt.Println()
+		tuner.PrintInfo("DRY RUN completed - no changes were made")
+		tuner.PrintInfo("Run without --dry-run to apply changes")
+	}
+
+	return nil
+}
+
+func showConfig(cmd *cobra.Command, args []string) error {
+	tuner.Banner()
+	tuner.PrintInfo("Current System Configuration")
+	fmt.Println()
+
+	// Initialize distro manager for config paths
+	distro, _ := tuner.NewDistroManager()
+
+	// Show GRUB config
+	grub := tuner.NewGrubTuner(false, distro)
+	if err := grub.ShowCurrent(); err != nil {
+		tuner.PrintWarning("Could not show GRUB config: %v", err)
+	}
+
+	// Show sysctl config
+	sysctl := tuner.NewSysctlTuner(false)
+	if err := sysctl.ShowCurrent(); err != nil {
+		tuner.PrintWarning("Could not show sysctl config: %v", err)
+	}
+
+	// Show fstab config
+	fstab := tuner.NewFstabTuner(false)
+	if err := fstab.ShowCurrent(); err != nil {
+		tuner.PrintWarning("Could not show fstab config: %v", err)
+	}
+
+	// Show I/O scheduler config
+	scheduler := tuner.NewSchedulerTuner(false)
+	if err := scheduler.ShowCurrent(); err != nil {
+		tuner.PrintWarning("Could not show I/O scheduler config: %v", err)
+	}
+
+	// Show network config
+	network := tuner.NewNetworkTuner(false)
+	if err := network.ShowCurrent(); err != nil {
+		tuner.PrintWarning("Could not show network config: %v", err)
+	}
+
+	return nil
+}
+
+func verifyConfig(cmd *cobra.Command, args []string) error {
+	tuner.Banner()
+	tuner.PrintStep("Verifying tuning configuration")
+
+	allGood := true
+
+	// Verify sysctl
+	sysctl := tuner.NewSysctlTuner(false)
+	if err := sysctl.Verify(); err != nil {
+		tuner.PrintWarning("Sysctl: %v", err)
+		allGood = false
+	}
+
+	// Verify I/O scheduler
+	scheduler := tuner.NewSchedulerTuner(false)
+	if err := scheduler.Verify(); err != nil {
+		tuner.PrintWarning("I/O Scheduler: %v", err)
+		allGood = false
+	}
+
+	// Verify network
+	network := tuner.NewNetworkTuner(false)
+	if err := network.Verify(); err != nil {
+		tuner.PrintWarning("Network: %v", err)
+		allGood = false
+	}
+
+	fmt.Println()
+	if allGood {
+		tuner.PrintSuccess("All tuning configurations are present")
+	} else {
+		tuner.PrintWarning("Some tuning configurations are missing")
+		tuner.PrintInfo("Run 'vmware-tuner' to apply tuning")
+	}
+
+	return nil
+}
+
+func runRollbackInteractive() error {
+	tuner.PrintStep("Restore Backup (Native Rollback)")
+
+	backups, err := tuner.ListBackups()
+	if err != nil {
+		return fmt.Errorf("failed to list backups: %w", err)
+	}
+
+	if len(backups) == 0 {
+		tuner.PrintWarning("No backups found.")
+		return nil
+	}
+
+	fmt.Println("Available backups:")
+	for i, backup := range backups {
+		fmt.Printf("  [%d] %s\n", i+1, backup)
+	}
+	fmt.Println("  [c] Cancel")
+	fmt.Println()
+
+	fmt.Print("Select backup to restore: ")
+	var selection string
+	fmt.Scanln(&selection)
+
+	if selection == "c" || selection == "C" {
+		tuner.PrintInfo("Rollback cancelled")
+		return nil
+	}
+
+	var index int
+	_, err = fmt.Sscanf(selection, "%d", &index)
+	if err != nil || index < 1 || index > len(backups) {
+		tuner.PrintError("Invalid selection")
+		return nil
+	}
+
+	targetBackup := backups[index-1]
+	backupDir := filepath.Join("/root", ".vmware-tuner-backups", targetBackup)
+
+	// Create a backup manager instance pointing to this directory
+	bm := &tuner.BackupManager{
+		BackupDir: backupDir,
+		Timestamp: targetBackup,
+	}
+
+	// Check if manifest exists
+	if !tuner.FileExists(filepath.Join(backupDir, "manifest.json")) {
+		// Fallback to legacy script if manifest is missing (backward compatibility)
+		scriptPath := filepath.Join(backupDir, "rollback.sh")
+		if tuner.FileExists(scriptPath) {
+			tuner.PrintWarning("Manifest missing, falling back to legacy rollback.sh")
+			tuner.PrintInfo("Executing rollback script from %s...", targetBackup)
+			cmd := exec.Command("/bin/bash", scriptPath)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Stdin = os.Stdin
+			return cmd.Run()
+		}
+		return fmt.Errorf("no manifest or rollback script found in %s", backupDir)
+	}
+
+	return bm.RestoreFromManifest()
+}
+
+
+========================================
+File: audit.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\audit.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"strings"
+)
+
+// AuditTuner handles system auditing
+type AuditTuner struct {
+	Distro *DistroManager
+}
+
+// NewAuditTuner creates a new audit tuner
+func NewAuditTuner(distro *DistroManager) *AuditTuner {
+	return &AuditTuner{
+		Distro: distro,
+	}
+}
+
+// RunAudit performs the audit and prints the report
+func (at *AuditTuner) RunAudit() error {
+	PrintStep("System Optimization Audit")
+
+	score := 0
+	maxScore := 100
+
+	// 1. Check VM Tools (30 points)
+	tools := NewVMToolsTuner(true, at.Distro)
+	installed, updateAvailable, days, _ := tools.CheckUpdateStatus()
+	
+	if installed {
+		if !updateAvailable {
+			PrintSuccess("VMware Tools installed and up-to-date (+30)")
+			score += 30
+		} else {
+			// Update available, deduct points based on age
+			points := 25
+			if days > 180 {
+				points = 10
+			} else if days > 90 {
+				points = 15
+			} else if days > 30 {
+				points = 20
+			}
+			PrintWarning("VMware Tools update available (installed %d days ago) (+%d/30)", days, points)
+			PrintInfo("Recommendation: Run 'Safe System Update' or update open-vm-tools")
+			score += points
+		}
+	} else {
+		PrintError("VMware Tools missing (0/30)")
+	}
+
+	// 2. Check GRUB (30 points)
+	grub := NewGrubTuner(true, at.Distro)
+	config, _, err := grub.ParseGrubConfig()
+	if err == nil {
+		cmdline := config["GRUB_CMDLINE_LINUX_DEFAULT"]
+		if strings.Contains(cmdline, "elevator=noop") || strings.Contains(cmdline, "elevator=none") {
+			PrintSuccess("I/O Scheduler optimized (+15)")
+			score += 15
+		} else {
+			PrintWarning("I/O Scheduler not optimized (0/15)")
+		}
+		
+		if strings.Contains(cmdline, "transparent_hugepage=madvise") {
+			PrintSuccess("Memory pages optimized (+15)")
+			score += 15
+		} else {
+			PrintWarning("Memory pages not optimized (0/15)")
+		}
+	} else {
+		PrintWarning("Could not read GRUB config")
+	}
+
+	// 3. Check Bloatware (20 points)
+	debloat := NewDebloatTuner(true)
+	bloat := debloat.GetBloatServices()
+	if len(bloat) == 0 {
+		PrintSuccess("No unnecessary services found (+20)")
+		score += 20
+	} else {
+		PrintWarning("Found %d unnecessary services (0/20)", len(bloat))
+		for _, svc := range bloat {
+			fmt.Printf("    - %s\n", svc.Name)
+		}
+	}
+
+	// 4. Check Sysctl (20 points)
+	// Simple check for swappiness
+	// In a real implementation we would check actual values
+	// For now, let's assume if the config file exists, it's good
+	if FileExists("/etc/sysctl.d/99-vmware-performance.conf") {
+		PrintSuccess("Sysctl optimizations present (+20)")
+		score += 20
+	} else {
+		PrintWarning("Sysctl optimizations missing (0/20)")
+	}
+
+	fmt.Println()
+	PrintStep("Audit Result")
+	
+	fmt.Printf("Final Score: %d/%d\n", score, maxScore)
+	
+	if score == 100 {
+		PrintSuccess("System is fully optimized! 🚀")
+	} else if score >= 70 {
+		PrintInfo("System is well optimized, but could be better.")
+	} else {
+		PrintWarning("System requires optimization.")
+		PrintInfo("Run 'Optimize this VM' from the main menu.")
+	}
+
+	return nil
+}
+
+
+========================================
+File: backup.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\backup.go
+========================================
+
+package tuner
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
+// BackupManager handles configuration file backups
+type BackupManager struct {
+	BackupDir string
+	Timestamp string
+}
+
+// ManifestEntry represents a single backed up file
+type ManifestEntry struct {
+	OriginalPath string      `json:"original_path"`
+	BackupPath   string      `json:"backup_path"`
+	Mode         os.FileMode `json:"mode"`
+}
+
+// Manifest represents the backup manifest
+type Manifest struct {
+	Timestamp string          `json:"timestamp"`
+	Entries   []ManifestEntry `json:"entries"`
+}
+
+// NewBackupManager creates a new backup manager
+func NewBackupManager() *BackupManager {
+	timestamp := time.Now().Format("20060102-150405")
+	backupDir := filepath.Join("/root", ".vmware-tuner-backups", timestamp)
+
+	return &BackupManager{
+		BackupDir: backupDir,
+		Timestamp: timestamp,
+	}
+}
+
+// Initialize creates the backup directory
+func (bm *BackupManager) Initialize() error {
+	if err := os.MkdirAll(bm.BackupDir, 0700); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
+	}
+	return nil
+}
+
+// BackupFile creates a backup of the specified file
+func (bm *BackupManager) BackupFile(filePath string) error {
+	// Check if source file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return nil
+	}
+
+	source, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file %s: %w", filePath, err)
+	}
+	defer source.Close()
+
+	// Create backup filename
+	backupFileName := filepath.Base(filePath)
+	backupPath := filepath.Join(bm.BackupDir, backupFileName)
+
+	backup, err := os.Create(backupPath)
+	if err != nil {
+		return fmt.Errorf("failed to create backup file: %w", err)
+	}
+	defer backup.Close()
+
+	if _, err := io.Copy(backup, source); err != nil {
+		return fmt.Errorf("failed to copy file: %w", err)
+	}
+
+	// Preserve permissions
+	sourceInfo, err := os.Stat(filePath)
+	if err == nil {
+		os.Chmod(backupPath, sourceInfo.Mode())
+
+		// Update Manifest
+		if err := bm.AddEntry(filePath, backupFileName, sourceInfo); err != nil {
+			PrintWarning("Failed to update manifest: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// AddEntry adds a file entry to the manifest.json
+func (bm *BackupManager) AddEntry(original, backupName string, info os.FileInfo) error {
+	manifestPath := filepath.Join(bm.BackupDir, "manifest.json")
+
+	var manifest Manifest
+
+	// Read existing manifest or create new
+	data, err := os.ReadFile(manifestPath)
+	if err == nil {
+		json.Unmarshal(data, &manifest)
+	} else {
+		manifest.Timestamp = bm.Timestamp
+		manifest.Entries = []ManifestEntry{}
+	}
+
+	entry := ManifestEntry{
+		OriginalPath: original,
+		BackupPath:   backupName,
+		Mode:         info.Mode(),
+	}
+
+	manifest.Entries = append(manifest.Entries, entry)
+
+	newData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal manifest: %w", err)
+	}
+
+	return os.WriteFile(manifestPath, newData, 0644)
+}
+
+// RestoreFromManifest restores files based on the manifest.json
+func (bm *BackupManager) RestoreFromManifest() error {
+	manifestPath := filepath.Join(bm.BackupDir, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("manifest not found: %w", err)
+	}
+
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	PrintInfo("Restauration du backup du %s...", manifest.Timestamp)
+
+	for _, entry := range manifest.Entries {
+		srcPath := filepath.Join(bm.BackupDir, entry.BackupPath)
+		destPath := entry.OriginalPath
+
+		PrintInfo("Restauration %s -> %s", entry.BackupPath, destPath)
+
+		src, err := os.Open(srcPath)
+		if err != nil {
+			PrintError("Impossible d'ouvrir le fichier backup %s: %v", srcPath, err)
+			continue
+		}
+
+		// Open dest with truncation
+		dest, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, entry.Mode)
+		if err != nil {
+			src.Close()
+			PrintError("Impossible d'écrire sur la destination %s: %v", destPath, err)
+			continue
+		}
+
+		if _, err := io.Copy(dest, src); err != nil {
+			PrintError("Erreur de copie vers %s: %v", destPath, err)
+		}
+
+		dest.Chmod(entry.Mode)
+		src.Close()
+		dest.Close()
+	}
+
+	// Trigger system reloads
+	exec.Command("systemctl", "daemon-reload").Run()
+	if _, err := os.Stat("/etc/default/grub"); err == nil {
+		if _, err := exec.LookPath("update-grub"); err == nil {
+			exec.Command("update-grub").Run()
+		} else {
+			// RHEL fallback logic if needed
+			exec.Command("grub2-mkconfig", "-o", "/boot/grub2/grub.cfg").Run()
+		}
+	}
+	exec.Command("sysctl", "--system").Run()
+
+	PrintSuccess("Restauration terminée.")
+	return nil
+}
+
+func (bm *BackupManager) GetBackupPath(filename string) string {
+	return filepath.Join(bm.BackupDir, filename)
+}
+
+// ListBackups lists all available backup timestamps
+func ListBackups() ([]string, error) {
+	backupRoot := "/root/.vmware-tuner-backups"
+	if _, err := os.Stat(backupRoot); os.IsNotExist(err) {
+		return []string{}, nil
+	}
+
+	entries, err := os.ReadDir(backupRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	var backups []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			backups = append(backups, entry.Name())
+		}
+	}
+	return backups, nil
+}
+
+func (bm *BackupManager) BackupServices(services []string) error {
+	// Not used in manifest logic directly but kept for compatibility
+	return nil
+}
+
+
+========================================
+File: benchmark.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\benchmark.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+// BenchmarkTuner handles network benchmarking
+type BenchmarkTuner struct{}
+
+// NewBenchmarkTuner creates a new benchmark tuner
+func NewBenchmarkTuner() *BenchmarkTuner {
+	return &BenchmarkTuner{}
+}
+
+// Run performs the benchmark
+func (bt *BenchmarkTuner) Run() error {
+	PrintStep("Network Benchmark")
+
+	// 1. Latency Test (Ping Gateway)
+	PrintInfo("Testing latency...")
+	gateway, err := getGateway()
+	if err != nil {
+		PrintWarning("Could not detect gateway: %v", err)
+	} else {
+		PrintInfo("Pinging gateway (%s)...", gateway)
+		// ping -c 4 -i 0.2 <gateway>
+		cmd := exec.Command("ping", "-c", "4", "-i", "0.2", gateway)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			PrintWarning("Ping failed: %v", err)
+		} else {
+			// Extract avg
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "rtt") || strings.Contains(line, "avg") {
+					fmt.Printf("  -> %s\n", strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+
+	// 2. Download Speed Test
+	fmt.Println()
+	PrintInfo("Testing download speed...")
+	PrintInfo("Downloading 100MB test file (will be deleted immediately)...")
+
+	url := "http://speedtest.tele2.net/100MB.zip" // Reliable public speedtest file
+	tmpFile := "/tmp/vmware-tuner-speedtest.tmp"
+
+	// START TIMER
+	start := time.Now()
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("download failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(tmpFile)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %v", err)
+	}
+	
+	// CRITICAL: Ensure file is deleted
+	defer func() {
+		out.Close()
+		os.Remove(tmpFile)
+		PrintSuccess("Temporary file deleted")
+	}()
+
+	// Copy content
+	written, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return fmt.Errorf("download interrupted: %v", err)
+	}
+
+	// STOP TIMER
+	elapsed := time.Since(start)
+
+	// Calculate speed
+	// written is bytes
+	// elapsed is duration
+	mb := float64(written) / 1024 / 1024
+	seconds := elapsed.Seconds()
+	speed := mb / seconds // MB/s
+
+	fmt.Printf("  -> Downloaded %.2f MB in %.2f seconds\n", mb, seconds)
+	PrintSuccess("Speed: %.2f MB/s (%.2f Mbps)", speed, speed*8)
+
+	return nil
+}
+
+func getGateway() (string, error) {
+	// ip route | grep default
+	cmd := exec.Command("ip", "route")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "default") {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				return parts[2], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no default route found")
+}
+
+
+========================================
+File: cleaner.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\cleaner.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os/exec"
+)
+
+// CleanerTuner handles system cleaning
+type CleanerTuner struct {
+	Distro *DistroManager
+}
+
+// NewCleanerTuner creates a new cleaner
+func NewCleanerTuner(distro *DistroManager) *CleanerTuner {
+	return &CleanerTuner{
+		Distro: distro,
+	}
+}
+
+// Run performs the cleaning
+func (ct *CleanerTuner) Run() error {
+	PrintStep("System Cleaner")
+
+	PrintInfo("This will:")
+	PrintInfo("  - Clean package manager cache")
+	PrintInfo("  - Vacuum system logs (keep last 3 days)")
+	PrintInfo("  - Remove old crash dumps")
+	fmt.Println()
+	fmt.Print("Continue? (y/n): ")
+	
+	var response string
+	fmt.Scanln(&response)
+	if response != "y" && response != "yes" {
+		PrintInfo("Cancelled")
+		return nil
+	}
+
+	// 1. Clean Package Cache
+	PrintInfo("Cleaning package cache...")
+	if ct.Distro.Type == DistroDebian {
+		exec.Command("apt-get", "clean").Run()
+		exec.Command("apt-get", "autoremove", "-y").Run()
+	} else if ct.Distro.Type == DistroRHEL {
+		if _, err := exec.LookPath("dnf"); err == nil {
+			exec.Command("dnf", "clean", "all").Run()
+			exec.Command("dnf", "autoremove", "-y").Run()
+		} else {
+			exec.Command("yum", "clean", "all").Run()
+			exec.Command("yum", "autoremove", "-y").Run()
+		}
+	}
+	PrintSuccess("Package cache cleaned")
+
+	// 2. Vacuum Journal
+	PrintInfo("Vacuuming system logs...")
+	if err := exec.Command("journalctl", "--vacuum-time=3d").Run(); err != nil {
+		PrintWarning("Failed to vacuum journal: %v", err)
+	} else {
+		PrintSuccess("Logs vacuumed (kept 3 days)")
+	}
+
+	// 3. Show Free Space
+	PrintInfo("Current Disk Usage:")
+	exec.Command("df", "-h", "/").Run()
+
+	return nil
+}
+
+
+========================================
+File: cron.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\cron.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// CronTuner handles scheduling
+type CronTuner struct{}
+
+// NewCronTuner creates a new cron tuner
+func NewCronTuner() *CronTuner {
+	return &CronTuner{}
+}
+
+// Run configures the schedule
+func (ct *CronTuner) Run() error {
+	PrintStep("Schedule Maintenance")
+
+	cronFile := "/etc/cron.d/vmware-tuner"
+	
+	// Check if already scheduled
+	if _, err := os.Stat(cronFile); err == nil {
+		PrintInfo("Maintenance is currently SCHEDULED.")
+		fmt.Print("Do you want to remove the schedule? (y/n): ")
+		var resp string
+		fmt.Scanln(&resp)
+		if resp == "y" {
+			os.Remove(cronFile)
+			PrintSuccess("Schedule removed")
+			return nil
+		}
+		return nil
+	}
+
+	PrintInfo("This will schedule:")
+	PrintInfo("  - Daily Time Sync Check (04:00 AM)")
+	PrintInfo("  - Weekly System Cleaning (Sunday 05:00 AM)")
+	fmt.Println()
+	fmt.Print("Enable this schedule? (y/n): ")
+	
+	var resp string
+	fmt.Scanln(&resp)
+	if resp != "y" {
+		PrintInfo("Cancelled")
+		return nil
+	}
+
+	// Get absolute path of current binary
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get binary path: %w", err)
+	}
+	
+	// Verify binary is in a good location
+	if filepath.Dir(binPath) == "/tmp" || filepath.Dir(binPath) == "/var/tmp" {
+		PrintWarning("Running from temporary directory!")
+		PrintWarning("Please move 'vmware-tuner' to /usr/local/bin/ first.")
+		return nil
+	}
+
+	// Create cron content
+	// 0 4 * * * root /path/to/vmware-tuner --timesync-only (we need to implement silent flags later or just use shell commands)
+	// Actually, since our tool is interactive, we should probably just schedule the raw commands for safety/simplicity
+	// OR we assume the user will run the tool with flags.
+	// Let's use raw commands for reliability, as the tool might move.
+	
+	content := `# VMware Tuner Maintenance
+# Generated by vmware-tuner
+
+# Daily Time Sync (Force sync if using chrony)
+0 4 * * * root systemctl is-active chronyd >/dev/null && chronyc makestep >/dev/null 2>&1
+
+# Weekly Cleaning (Safe vacuum)
+0 5 * * 0 root journalctl --vacuum-time=3d >/dev/null 2>&1 && apt-get clean >/dev/null 2>&1 || yum clean all >/dev/null 2>&1
+`
+
+	if err := os.WriteFile(cronFile, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write cron file: %w", err)
+	}
+
+	PrintSuccess("Maintenance scheduled successfully!")
+	PrintInfo("Created %s", cronFile)
+
+	return nil
+}
+
+
+========================================
+File: debloat.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\debloat.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os/exec"
+)
+
+// DebloatTuner handles disabling unnecessary services
+type DebloatTuner struct {
+	DryRun bool
+}
+
+// NewDebloatTuner creates a new debloat tuner
+func NewDebloatTuner(dryRun bool) *DebloatTuner {
+	return &DebloatTuner{
+		DryRun: dryRun,
+	}
+}
+
+// Service represents a system service
+type Service struct {
+	Name        string
+	Description string
+	Active      bool
+}
+
+// GetBloatServices returns a list of potentially unnecessary services
+func (dt *DebloatTuner) GetBloatServices() []Service {
+	// List of services to check
+	targets := []Service{
+		{Name: "cups", Description: "Printing service (CUPS)"},
+		{Name: "cups-browsed", Description: "Printer discovery"},
+		{Name: "avahi-daemon", Description: "mDNS/DNS-SD (Avahi)"},
+		{Name: "bluetooth", Description: "Bluetooth service"},
+		{Name: "wpa_supplicant", Description: "Wi-Fi security (WPA)"},
+		{Name: "modemmanager", Description: "Modem Manager"},
+		{Name: "snapd", Description: "Snap Package Manager (consumes loop devices)"},
+		{Name: "lxcfs", Description: "LXC File System (if not using containers)"},
+		{Name: "multipathd", Description: "Multipath Device Daemon (unless using SAN)"},
+	}
+
+	var found []Service
+	for _, svc := range targets {
+		if dt.isServiceActive(svc.Name) {
+			svc.Active = true
+			found = append(found, svc)
+		}
+	}
+
+	return found
+}
+
+// isServiceActive checks if a service is active
+func (dt *DebloatTuner) isServiceActive(name string) bool {
+	cmd := exec.Command("systemctl", "is-active", name)
+	err := cmd.Run()
+	return err == nil
+}
+
+// Apply disables the identified services
+func (dt *DebloatTuner) Apply(backup *BackupManager) error {
+	PrintStep("Checking for unnecessary services (Server Slim Mode)")
+
+	services := dt.GetBloatServices()
+	if len(services) == 0 {
+		PrintSuccess("System is already clean (no bloatware found)")
+		return nil
+	}
+
+	PrintInfo("Found %d unnecessary services:", len(services))
+	for _, svc := range services {
+		fmt.Printf("  - %s: %s\n", svc.Name, svc.Description)
+	}
+
+	if dt.DryRun {
+		PrintInfo("Would disable these services")
+		return nil
+	}
+
+	// Ask for confirmation if not already confirmed in main
+	// For now, we assume the user opted-in via flag or interactive prompt in main
+
+	// Backup services first
+	var serviceNames []string
+	for _, svc := range services {
+		serviceNames = append(serviceNames, svc.Name)
+	}
+	if err := backup.BackupServices(serviceNames); err != nil {
+		PrintWarning("Failed to backup service list: %v", err)
+	}
+
+	for _, svc := range services {
+		PrintInfo("Disabling %s...", svc.Name)
+		
+		// Stop
+		exec.Command("systemctl", "stop", svc.Name).Run()
+		
+		// Disable
+		if err := exec.Command("systemctl", "disable", svc.Name).Run(); err != nil {
+			PrintWarning("Failed to disable %s: %v", svc.Name, err)
+		} else {
+			PrintSuccess("Disabled %s", svc.Name)
+		}
+	}
+
+	return nil
+}
+
+// DisableServices disables a specific list of services
+func (dt *DebloatTuner) DisableServices(services []Service, backup *BackupManager) error {
+	// Backup services first
+	var serviceNames []string
+	for _, svc := range services {
+		serviceNames = append(serviceNames, svc.Name)
+	}
+	if err := backup.BackupServices(serviceNames); err != nil {
+		PrintWarning("Failed to backup service list: %v", err)
+	}
+
+	for _, svc := range services {
+		PrintInfo("Disabling %s...", svc.Name)
+		
+		if dt.DryRun {
+			continue
+		}
+		
+		// Stop
+		exec.Command("systemctl", "stop", svc.Name).Run()
+		
+		// Disable
+		if err := exec.Command("systemctl", "disable", svc.Name).Run(); err != nil {
+			PrintWarning("Failed to disable %s: %v", svc.Name, err)
+		} else {
+			PrintSuccess("Disabled %s", svc.Name)
+		}
+	}
+	return nil
+}
+
+
+========================================
+File: disk.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\disk.go
+========================================
+
+package tuner
+
+import (
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"strings"
+)
+
+// DiskTuner handles disk expansion
+type DiskTuner struct {
+	Distro *DistroManager
+}
+
+// NewDiskTuner creates a new disk tuner
+func NewDiskTuner(distro *DistroManager) *DiskTuner {
+	return &DiskTuner{
+		Distro: distro,
+	}
+}
+
+// BlockDevice represents a block device from lsblk JSON
+type BlockDevice struct {
+	Name       string        `json:"name"`
+	Type       string        `json:"type"`
+	Mountpoint string        `json:"mountpoint"`
+	Children   []BlockDevice `json:"children,omitempty"`
+}
+
+// LsblkOutput represents the root JSON output from lsblk
+type LsblkOutput struct {
+	BlockDevices []BlockDevice `json:"blockdevices"`
+}
+
+// ExpandRoot expands the root partition and filesystem
+func (dt *DiskTuner) ExpandRoot() error {
+	PrintStep("Disk Expansion Assistant")
+
+	PrintWarning("⚠️  ATTENTION : Les opérations sur disque comportent un risque.")
+	PrintWarning("Assurez-vous d'avoir un snapshot ou une sauvegarde avant de continuer.")
+	fmt.Println()
+
+	if !AskUser("Voulez-vous continuer ?") {
+		PrintInfo("Opération annulée")
+		return nil
+	}
+
+	// 1. Install dependencies
+	if err := dt.Distro.InstallPackage("cloud-guest-utils"); err != nil {
+		// Fallback for RHEL-based systems
+		dt.Distro.InstallPackage("cloud-utils-growpart")
+	}
+
+	// 2. Identify root device using lsblk JSON
+	PrintInfo("Analyse de la structure disque (JSON)...")
+
+	cmd := exec.Command("lsblk", "-J", "-o", "NAME,TYPE,MOUNTPOINT")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("lsblk failed: %w", err)
+	}
+
+	var data LsblkOutput
+	if err := json.Unmarshal(output, &data); err != nil {
+		return fmt.Errorf("failed to parse lsblk json: %w", err)
+	}
+
+	diskName, partNum, err := dt.findRootInTree(data.BlockDevices)
+	if err != nil {
+		return err
+	}
+
+	PrintInfo("Cible détectée -> Disque: /dev/%s, Partition N°: %s", diskName, partNum)
+
+	// 3. Grow Partition
+	PrintInfo("Extension de la partition...")
+	// growpart /dev/sda 1
+	cmd = exec.Command("growpart", "/dev/"+diskName, partNum)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "NOCHANGE") {
+			PrintSuccess("La partition est déjà à la taille maximale")
+		} else {
+			return fmt.Errorf("growpart failed: %v\nOutput: %s", err, string(out))
+		}
+	} else {
+		PrintSuccess("Partition étendue avec succès")
+	}
+
+	// 4. Resize Filesystem
+	PrintInfo("Redimensionnement du système de fichiers...")
+
+	// Detect FS Type
+	cmd = exec.Command("findmnt", "/", "-o", "FSTYPE", "-n")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to detect fs type: %w", err)
+	}
+	fsType := strings.TrimSpace(string(out))
+	PrintInfo("Type de FS: %s", fsType)
+
+	// Construct partition path for resize command
+	// Logic: /dev/sda + 1 => /dev/sda1, but /dev/nvme0n1 + 1 => /dev/nvme0n1p1
+	partPath := "/dev/" + diskName
+	if (strings.Contains(diskName, "nvme") || strings.Contains(diskName, "loop") || strings.Contains(diskName, "mmcblk")) && !strings.HasSuffix(diskName, "p") {
+		partPath += "p" + partNum
+	} else {
+		partPath += partNum
+	}
+
+	if fsType == "ext4" {
+		cmd = exec.Command("resize2fs", partPath)
+	} else if fsType == "xfs" {
+		cmd = exec.Command("xfs_growfs", "/")
+	} else {
+		return fmt.Errorf("système de fichiers non supporté pour l'auto-resize: %s", fsType)
+	}
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("resize failed: %v\nOutput: %s", err, string(out))
+	}
+
+	PrintSuccess("Système de fichiers étendu avec succès !")
+
+	// Show new size
+	exec.Command("df", "-h", "/").Run()
+
+	return nil
+}
+
+// findRootInTree traverses the BlockDevice tree to find the disk containing /
+func (dt *DiskTuner) findRootInTree(devices []BlockDevice) (string, string, error) {
+	for _, dev := range devices {
+		// Case 1: The device itself is mounted as root (rare, unpartitioned disk)
+		if dev.Mountpoint == "/" {
+			return dev.Name, "", fmt.Errorf("root is on a raw disk without partitions, dangerous to resize automatically")
+		}
+
+		// Case 2: Check children (partitions)
+		if len(dev.Children) > 0 {
+			for _, child := range dev.Children {
+				if child.Mountpoint == "/" {
+					// Found it! Parent is 'dev', Child is 'child'
+					// We need to extract the partition number from the child name relative to parent
+					// e.g., Parent: sda, Child: sda1 -> PartNum: 1
+					partNum := dt.extractPartitionNumber(dev.Name, child.Name)
+					return dev.Name, partNum, nil
+				}
+
+				// Handle LVM (Child might be a Volume Group container)
+				if len(child.Children) > 0 {
+					// Recursive check not fully implemented for deep LVM layers for safety
+					// But we can check if LVM logical volume is root
+					for _, lv := range child.Children {
+						if lv.Mountpoint == "/" {
+							return "", "", fmt.Errorf("LVM detected. Automated LVM resizing is disabled for safety")
+						}
+					}
+				}
+			}
+		}
+	}
+	return "", "", fmt.Errorf("root partition not found in disk tree")
+}
+
+func (dt *DiskTuner) extractPartitionNumber(disk, partition string) string {
+	// Simple heuristic: remove the disk name from the partition name
+	// sda1 - sda = 1
+	// nvme0n1p1 - nvme0n1 = p1 -> clean to 1
+
+	suffix := strings.TrimPrefix(partition, disk)
+
+	// Remove 'p' separator if present (nvme0n1p1 -> 1)
+	if strings.HasPrefix(suffix, "p") {
+		suffix = strings.TrimPrefix(suffix, "p")
+	}
+
+	// Extract digits
+	re := regexp.MustCompile(`\d+`)
+	match := re.FindString(suffix)
+	if match != "" {
+		return match
+	}
+
+	return "1" // Fallback
+}
+
+
+========================================
+File: distro.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\distro.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// DistroType represents the Linux distribution family
+type DistroType int
+
+const (
+	DistroUnknown DistroType = iota
+	DistroDebian             // Debian, Ubuntu, Kali, Mint
+	DistroRHEL               // RHEL, CentOS, Fedora, AlmaLinux, Rocky
+)
+
+// DistroManager handles distribution-specific operations
+type DistroManager struct {
+	Type DistroType
+	Name string
+}
+
+// NewDistroManager creates a new distribution manager
+func NewDistroManager() (*DistroManager, error) {
+	dm := &DistroManager{
+		Type: DistroUnknown,
+	}
+
+	if err := dm.detect(); err != nil {
+		return nil, err
+	}
+
+	return dm, nil
+}
+
+// detect determines the running Linux distribution
+func (dm *DistroManager) detect() error {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return fmt.Errorf("failed to read /etc/os-release: %w", err)
+	}
+
+	content := string(data)
+	contentLower := strings.ToLower(content)
+
+	if strings.Contains(contentLower, "debian") || strings.Contains(contentLower, "ubuntu") {
+		dm.Type = DistroDebian
+		dm.Name = "Debian/Ubuntu"
+	} else if strings.Contains(contentLower, "rhel") || strings.Contains(contentLower, "centos") || 
+		strings.Contains(contentLower, "fedora") || strings.Contains(contentLower, "almalinux") || 
+		strings.Contains(contentLower, "rocky") {
+		dm.Type = DistroRHEL
+		dm.Name = "RHEL/CentOS"
+	} else {
+		// Fallback: check for package managers
+		if _, err := exec.LookPath("apt-get"); err == nil {
+			dm.Type = DistroDebian
+			dm.Name = "Debian-based"
+		} else if _, err := exec.LookPath("yum"); err == nil {
+			dm.Type = DistroRHEL
+			dm.Name = "RHEL-based"
+		} else if _, err := exec.LookPath("dnf"); err == nil {
+			dm.Type = DistroRHEL
+			dm.Name = "RHEL-based"
+		} else {
+			return fmt.Errorf("unsupported distribution")
+		}
+	}
+
+	return nil
+}
+
+// InstallPackage installs a package using the system package manager
+func (dm *DistroManager) InstallPackage(pkg string) error {
+	var cmd *exec.Cmd
+
+	switch dm.Type {
+	case DistroDebian:
+		// Update apt cache first? Maybe too slow. Just try install.
+		// apt-get install -y <pkg>
+		cmd = exec.Command("apt-get", "install", "-y", pkg)
+	case DistroRHEL:
+		// dnf install -y <pkg> (or yum)
+		if _, err := exec.LookPath("dnf"); err == nil {
+			cmd = exec.Command("dnf", "install", "-y", pkg)
+		} else {
+			cmd = exec.Command("yum", "install", "-y", pkg)
+		}
+	default:
+		return fmt.Errorf("unknown distribution type")
+	}
+
+	PrintInfo("Installing package %s...", pkg)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to install %s: %v\nOutput: %s", pkg, err, string(output))
+	}
+
+	PrintSuccess("Installed %s", pkg)
+	return nil
+}
+
+// UpdateGrub updates the GRUB configuration
+func (dm *DistroManager) UpdateGrub() error {
+	switch dm.Type {
+	case DistroDebian:
+		cmd := exec.Command("update-grub")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("update-grub failed: %v\nOutput: %s", err, string(output))
+		}
+		return nil
+
+	case DistroRHEL:
+		// Detect correct output path for grub2-mkconfig
+		outputPath := "/boot/grub2/grub.cfg"
+		
+		// Check for UEFI
+		if _, err := os.Stat("/sys/firmware/efi"); err == nil {
+			// UEFI detected
+			// RHEL 7/8/9 location variations
+			// Common paths: /boot/efi/EFI/redhat/grub.cfg, /boot/efi/EFI/centos/grub.cfg
+			
+			// Try to find the correct path
+			candidates := []string{
+				"/boot/efi/EFI/redhat/grub.cfg",
+				"/boot/efi/EFI/centos/grub.cfg",
+				"/boot/efi/EFI/almalinux/grub.cfg",
+				"/boot/efi/EFI/rocky/grub.cfg",
+				"/boot/efi/EFI/fedora/grub.cfg",
+			}
+			
+			found := false
+			for _, path := range candidates {
+				if _, err := os.Stat(path); err == nil {
+					outputPath = path
+					found = true
+					break
+				}
+			}
+			
+			// On newer RHEL (9.3+), /boot/grub2/grub.cfg might be the unified location even for EFI
+			// If no specific EFI file found, stick to /boot/grub2/grub.cfg or try to detect if it's a symlink?
+			// For now, if not found in EFI partition, default to /boot/grub2/grub.cfg
+			if !found {
+				PrintWarning("Could not detect specific EFI GRUB path, defaulting to %s", outputPath)
+			}
+		}
+
+		PrintInfo("Updating GRUB config at %s...", outputPath)
+		cmd := exec.Command("grub2-mkconfig", "-o", outputPath)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("grub2-mkconfig failed: %v\nOutput: %s", err, string(output))
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unsupported distribution for GRUB update")
+	}
+}
+
+// GetGrubConfigPath returns the path to the GRUB configuration file
+func (dm *DistroManager) GetGrubConfigPath() string {
+	// Usually /etc/default/grub for both
+	return "/etc/default/grub"
+}
+
+
+========================================
+File: docker.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\docker.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// DockerTuner handles Docker optimization
+type DockerTuner struct{}
+
+// NewDockerTuner creates a new docker tuner
+func NewDockerTuner() *DockerTuner {
+	return &DockerTuner{}
+}
+
+// Run performs the optimization
+func (dt *DockerTuner) Run() error {
+	PrintStep("Docker Optimizer")
+
+	// 1. Check if Docker is installed
+	if _, err := exec.LookPath("docker"); err != nil {
+		PrintWarning("Docker is not installed.")
+		return nil
+	}
+	PrintSuccess("Docker is installed")
+
+	// 2. Check Log Rotation
+	daemonFile := "/etc/docker/daemon.json"
+	needsRotation := true
+
+	if _, err := os.Stat(daemonFile); err == nil {
+		content, _ := os.ReadFile(daemonFile)
+		if strings.Contains(string(content), "log-driver") && strings.Contains(string(content), "max-size") {
+			PrintSuccess("Log rotation is already configured")
+			needsRotation = false
+		}
+	}
+
+	if needsRotation {
+		PrintWarning("Docker log rotation is NOT configured.")
+		PrintInfo("Containers can fill the disk with logs.")
+		fmt.Print("Configure log rotation (max-size=10m, max-file=3)? (y/n): ")
+		var resp string
+		fmt.Scanln(&resp)
+		if resp == "y" {
+			// Create or update daemon.json
+			// Simple overwrite if not exists, or append warning if complex
+			if _, err := os.Stat(daemonFile); os.IsNotExist(err) {
+				content := `{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+`
+				if err := os.WriteFile(daemonFile, []byte(content), 0644); err != nil {
+					PrintWarning("Failed to write daemon.json: %v", err)
+				} else {
+					PrintSuccess("Configuration created. Restart Docker to apply.")
+					exec.Command("systemctl", "restart", "docker").Run()
+				}
+			} else {
+				PrintWarning("daemon.json exists. Please add log-opts manually to avoid overwriting custom config.")
+			}
+		}
+	}
+
+	// 3. Prune
+	fmt.Println()
+	PrintInfo("Docker System Prune")
+	PrintInfo("This will remove:")
+	PrintInfo("  - Stopped containers")
+	PrintInfo("  - Unused networks")
+	PrintInfo("  - Dangling images")
+	PrintInfo("  - Build cache")
+	fmt.Print("Run prune? (y/n): ")
+	var resp string
+	fmt.Scanln(&resp)
+	if resp == "y" {
+		cmd := exec.Command("docker", "system", "prune", "-f")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			PrintWarning("Prune failed: %v", err)
+		} else {
+			PrintSuccess("System pruned")
+		}
+	}
+
+	return nil
+}
+
+
+========================================
+File: exec_utils.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\exec_utils.go
+========================================
+
+package tuner
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// RunCommand executes a shell command and manages output
+func RunCommand(name string, args ...string) error {
+	PrintInfo("Running: %s %s", name, strings.Join(args, " "))
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("command failed: %w", err)
+	}
+	return nil
+}
+
+// RunCommandSilent executes a shell command without streaming output to stdout
+// Returns output and error
+func RunCommandSilent(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+// AskUser prompts the user with a question and returns true for yes, false for no
+func AskUser(question string) bool {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("%s (y/n): ", question)
+		input, _ := reader.ReadString('\n')
+		input = strings.ToLower(strings.TrimSpace(input))
+
+		if input == "y" || input == "yes" {
+			return true
+		}
+		if input == "n" || input == "no" {
+			return false
+		}
+		PrintWarning("Please answer 'y' or 'n'")
+	}
+}
+
+// Pause waits for the user to press Enter
+func Pause() {
+	fmt.Println()
+	fmt.Println("Press Enter to return to menu...")
+	bufio.NewReader(os.Stdin).ReadBytes('\n')
+}
+
+
+========================================
+File: fstab.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\fstab.go
+========================================
+
+package tuner
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+)
+
+// FstabTuner handles /etc/fstab optimization
+type FstabTuner struct {
+	FstabPath string
+	DryRun    bool
+}
+
+// NewFstabTuner creates a new fstab tuner
+func NewFstabTuner(dryRun bool) *FstabTuner {
+	return &FstabTuner{
+		FstabPath: "/etc/fstab",
+		DryRun:    dryRun,
+	}
+}
+
+// FstabEntry represents a line in /etc/fstab
+type FstabEntry struct {
+	Device     string
+	MountPoint string
+	FSType     string
+	Options    []string
+	Dump       string
+	Pass       string
+	Comment    string
+	IsComment  bool
+}
+
+// ParseFstab parses /etc/fstab and returns entries
+func (ft *FstabTuner) ParseFstab() ([]FstabEntry, error) {
+	file, err := os.Open(ft.FstabPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", ft.FstabPath, err)
+	}
+	defer file.Close()
+
+	var entries []FstabEntry
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		// Handle comments and empty lines
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			entries = append(entries, FstabEntry{
+				Comment:   line,
+				IsComment: true,
+			})
+			continue
+		}
+
+		// Parse fstab entry
+		fields := regexp.MustCompile(`\s+`).Split(trimmed, -1)
+		if len(fields) < 4 {
+			// Malformed line, keep as comment
+			entries = append(entries, FstabEntry{
+				Comment:   line,
+				IsComment: true,
+			})
+			continue
+		}
+
+		entry := FstabEntry{
+			Device:     fields[0],
+			MountPoint: fields[1],
+			FSType:     fields[2],
+			Options:    strings.Split(fields[3], ","),
+			IsComment:  false,
+		}
+
+		if len(fields) > 4 {
+			entry.Dump = fields[4]
+		} else {
+			entry.Dump = "0"
+		}
+
+		if len(fields) > 5 {
+			entry.Pass = fields[5]
+		} else {
+			entry.Pass = "0"
+		}
+
+		entries = append(entries, entry)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading fstab: %w", err)
+	}
+
+	return entries, nil
+}
+
+// OptimizeEntry optimizes mount options for a given entry
+func (ft *FstabTuner) OptimizeEntry(entry *FstabEntry) bool {
+	// Only optimize ext4 filesystems
+	if entry.FSType != "ext4" {
+		return false
+	}
+
+	// Skip swap and special filesystems
+	if entry.MountPoint == "none" || entry.FSType == "swap" {
+		return false
+	}
+
+	modified := false
+	options := make(map[string]bool)
+
+	// Parse existing options
+	for _, opt := range entry.Options {
+		options[opt] = true
+	}
+
+	// Remove discard if present (VMware doesn't support it)
+	if options["discard"] {
+		delete(options, "discard")
+		modified = true
+	}
+
+	// Add performance options if not present
+	performanceOpts := []string{"noatime", "nodiratime"}
+	for _, opt := range performanceOpts {
+		if !options[opt] {
+			options[opt] = true
+			modified = true
+		}
+	}
+
+	// Add commit=60 if not present
+	hasCommit := false
+	for opt := range options {
+		if strings.HasPrefix(opt, "commit=") {
+			hasCommit = true
+			break
+		}
+	}
+	if !hasCommit {
+		options["commit=60"] = true
+		modified = true
+	}
+
+	// Rebuild options slice
+	if modified {
+		newOptions := []string{}
+		for opt := range options {
+			newOptions = append(newOptions, opt)
+		}
+		entry.Options = newOptions
+	}
+
+	return modified
+}
+
+// Apply applies fstab optimizations
+func (ft *FstabTuner) Apply(backup *BackupManager) error {
+	PrintStep("Optimizing /etc/fstab")
+
+	// Parse current fstab
+	entries, err := ft.ParseFstab()
+	if err != nil {
+		return err
+	}
+
+	// Optimize entries
+	modified := false
+	for i := range entries {
+		if !entries[i].IsComment {
+			if ft.OptimizeEntry(&entries[i]) {
+				modified = true
+				PrintInfo("Optimizing: %s mounted at %s",
+					entries[i].Device, entries[i].MountPoint)
+			}
+		}
+	}
+
+	if !modified {
+		PrintSuccess("No fstab optimizations needed")
+		return nil
+	}
+
+	// Generate new fstab content
+	newContent := ft.GenerateFstab(entries)
+
+	if ft.DryRun {
+		PrintInfo("Would update: %s", ft.FstabPath)
+		PrintInfo("New content preview:")
+		fmt.Println(newContent)
+		return nil
+	}
+
+	// Backup existing fstab
+	if err := backup.BackupFile(ft.FstabPath); err != nil {
+		return fmt.Errorf("failed to backup fstab: %w", err)
+	}
+
+	// Write new fstab
+	if err := os.WriteFile(ft.FstabPath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to write fstab: %w", err)
+	}
+
+	PrintSuccess("Updated %s", ft.FstabPath)
+
+	// Remount filesystems with new options
+	PrintInfo("Remounting filesystems...")
+	for _, entry := range entries {
+		if !entry.IsComment && entry.FSType == "ext4" && entry.MountPoint != "none" {
+			if err := ft.RemountFilesystem(entry.MountPoint); err != nil {
+				PrintWarning("Failed to remount %s: %v", entry.MountPoint, err)
+				PrintWarning("A reboot may be required for changes to take effect")
+			} else {
+				PrintSuccess("Remounted %s", entry.MountPoint)
+			}
+		}
+	}
+
+	return nil
+}
+
+// GenerateFstab generates fstab content from entries
+func (ft *FstabTuner) GenerateFstab(entries []FstabEntry) string {
+	var lines []string
+
+	for _, entry := range entries {
+		if entry.IsComment {
+			lines = append(lines, entry.Comment)
+			continue
+		}
+
+		// Format the entry
+		optionsStr := strings.Join(entry.Options, ",")
+		line := fmt.Sprintf("%-45s %-15s %-7s %-30s %s %s",
+			entry.Device,
+			entry.MountPoint,
+			entry.FSType,
+			optionsStr,
+			entry.Dump,
+			entry.Pass)
+
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// RemountFilesystem remounts a filesystem with new options
+func (ft *FstabTuner) RemountFilesystem(mountPoint string) error {
+	cmd := exec.Command("mount", "-o", "remount", mountPoint)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w", string(output), err)
+	}
+	return nil
+}
+
+// ShowCurrent displays current fstab configuration
+func (ft *FstabTuner) ShowCurrent() error {
+	PrintStep("Current /etc/fstab entries")
+
+	entries, err := ft.ParseFstab()
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsComment {
+			continue
+		}
+
+		fmt.Printf("\n  Mount: %s\n", entry.MountPoint)
+		fmt.Printf("  Device: %s\n", entry.Device)
+		fmt.Printf("  Type: %s\n", entry.FSType)
+		fmt.Printf("  Options: %s\n", strings.Join(entry.Options, ","))
+	}
+
+	return nil
+}
+
+
+========================================
+File: grub.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\grub.go
+========================================
+
+package tuner
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+)
+
+// GrubTuner handles GRUB boot parameter optimization
+type GrubTuner struct {
+	GrubPath string
+	DryRun   bool
+	Distro   *DistroManager
+}
+
+// NewGrubTuner creates a new GRUB tuner
+func NewGrubTuner(dryRun bool, distro *DistroManager) *GrubTuner {
+	path := "/etc/default/grub"
+	if distro != nil {
+		path = distro.GetGrubConfigPath()
+	}
+	
+	return &GrubTuner{
+		GrubPath: path,
+		DryRun:   dryRun,
+		Distro:   distro,
+	}
+}
+
+// VMwareBootParams returns optimal boot parameters for VMware VMs
+func (gt *GrubTuner) VMwareBootParams() []string {
+	return []string{
+		"elevator=noop",                    // I/O scheduler for VMs
+		"transparent_hugepage=madvise",     // Reduce memory fragmentation
+		"vsyscall=emulate",                 // VMware compatibility
+		"clocksource=tsc",                  // Use TSC for time
+		"tsc=reliable",                     // Trust TSC
+		"intel_idle.max_cstate=0",          // Disable deep C-states
+		"processor.max_cstate=1",           // Keep CPU responsive
+		"nmi_watchdog=0",                   // Disable NMI watchdog (save CPU)
+		"pcie_aspm=off",                    // Disable PCIe power management
+		"nvme_core.default_ps_max_latency_us=0", // Disable NVMe power save
+	}
+}
+
+// ParseGrubConfig parses GRUB configuration
+func (gt *GrubTuner) ParseGrubConfig() (map[string]string, []string, error) {
+	file, err := os.Open(gt.GrubPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open %s: %w", gt.GrubPath, err)
+	}
+	defer file.Close()
+
+	config := make(map[string]string)
+	var lines []string
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		lines = append(lines, line)
+
+		// Parse key=value pairs
+		if strings.HasPrefix(strings.TrimSpace(line), "#") || !strings.Contains(line, "=") {
+			continue
+		}
+
+		// Match GRUB_* variables
+		re := regexp.MustCompile(`^([A-Z_]+)=(.*)$`)
+		matches := re.FindStringSubmatch(strings.TrimSpace(line))
+		if len(matches) == 3 {
+			key := matches[1]
+			value := strings.Trim(matches[2], `"`)
+			config[key] = value
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, nil, fmt.Errorf("error reading grub config: %w", err)
+	}
+
+	return config, lines, nil
+}
+
+// Apply applies GRUB optimizations
+func (gt *GrubTuner) Apply(backup *BackupManager) error {
+	PrintStep("Optimizing GRUB boot parameters")
+
+	// Parse current GRUB config
+	config, lines, err := gt.ParseGrubConfig()
+	if err != nil {
+		return err
+	}
+
+	// Get current cmdline
+	currentCmdline := config["GRUB_CMDLINE_LINUX_DEFAULT"]
+	currentParams := gt.parseParams(currentCmdline)
+
+	// Get VMware optimal params
+	vmwareParams := gt.VMwareBootParams()
+
+	// Merge parameters
+	newParams := gt.mergeParams(currentParams, vmwareParams)
+	newCmdline := strings.Join(newParams, " ")
+
+	// Check if modification is needed
+	if currentCmdline == newCmdline {
+		PrintSuccess("GRUB boot parameters already optimized")
+		return nil
+	}
+
+	PrintInfo("Current cmdline: %s", currentCmdline)
+	PrintInfo("New cmdline: %s", newCmdline)
+
+	if gt.DryRun {
+		PrintInfo("Would update: %s", gt.GrubPath)
+		return nil
+	}
+
+	// Backup existing GRUB config
+	if err := backup.BackupFile(gt.GrubPath); err != nil {
+		return fmt.Errorf("failed to backup grub config: %w", err)
+	}
+
+	// Update GRUB configuration
+	newLines := gt.updateGrubLines(lines, newCmdline)
+	newContent := strings.Join(newLines, "\n") + "\n"
+
+	if err := os.WriteFile(gt.GrubPath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to write grub config: %w", err)
+	}
+
+	PrintSuccess("Updated %s", gt.GrubPath)
+
+	// Run update-grub
+	PrintInfo("Updating GRUB configuration...")
+	if err := gt.Distro.UpdateGrub(); err != nil {
+		PrintWarning("Failed to update GRUB: %v", err)
+		return fmt.Errorf("grub update failed: %w", err)
+	}
+
+	PrintSuccess("GRUB configuration updated")
+	PrintWarning("REBOOT REQUIRED for boot parameter changes to take effect")
+
+	return nil
+}
+
+// parseParams parses a space-separated parameter string
+func (gt *GrubTuner) parseParams(cmdline string) []string {
+	if cmdline == "" {
+		return []string{}
+	}
+
+	// Split by whitespace
+	params := strings.Fields(cmdline)
+	return params
+}
+
+// mergeParams merges existing and new parameters
+func (gt *GrubTuner) mergeParams(existing, new []string) []string {
+	// Create a map to track parameter keys
+	paramMap := make(map[string]string)
+
+	// Extract key from param (handle key=value and standalone params)
+	getKey := func(param string) string {
+		if idx := strings.Index(param, "="); idx != -1 {
+			return param[:idx]
+		}
+		return param
+	}
+
+	// Add existing params
+	for _, param := range existing {
+		key := getKey(param)
+		paramMap[key] = param
+	}
+
+	// Add/override with new params
+	for _, param := range new {
+		key := getKey(param)
+		paramMap[key] = param
+	}
+
+	// Convert back to slice
+	var result []string
+	for _, param := range paramMap {
+		result = append(result, param)
+	}
+
+	return result
+}
+
+// updateGrubLines updates GRUB_CMDLINE_LINUX_DEFAULT in the config lines
+func (gt *GrubTuner) updateGrubLines(lines []string, newCmdline string) []string {
+	var newLines []string
+	re := regexp.MustCompile(`^GRUB_CMDLINE_LINUX_DEFAULT=`)
+
+	for _, line := range lines {
+		if re.MatchString(strings.TrimSpace(line)) {
+			newLines = append(newLines, fmt.Sprintf(`GRUB_CMDLINE_LINUX_DEFAULT="%s"`, newCmdline))
+		} else {
+			newLines = append(newLines, line)
+		}
+	}
+
+	return newLines
+}
+
+// ShowCurrent displays current boot parameters
+func (gt *GrubTuner) ShowCurrent() error {
+	PrintStep("Current GRUB configuration")
+
+	config, _, err := gt.ParseGrubConfig()
+	if err != nil {
+		return err
+	}
+
+	cmdline := config["GRUB_CMDLINE_LINUX_DEFAULT"]
+	params := gt.parseParams(cmdline)
+
+	fmt.Printf("  GRUB_CMDLINE_LINUX_DEFAULT=\"%s\"\n\n", cmdline)
+	fmt.Println("  Boot parameters:")
+	for _, param := range params {
+		fmt.Printf("    - %s\n", param)
+	}
+
+	// Also show current running kernel parameters
+	PrintStep("Current running kernel parameters")
+	data, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("  %s\n", strings.TrimSpace(string(data)))
+
+	return nil
+}
+
+
+========================================
+File: hardware.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\hardware.go
+========================================
+
+package tuner
+
+import (
+	"os/exec"
+	"strings"
+)
+
+// HardwareTuner handles hardware verification
+type HardwareTuner struct {
+	Distro *DistroManager
+}
+
+// NewHardwareTuner creates a new hardware tuner
+func NewHardwareTuner(distro *DistroManager) *HardwareTuner {
+	return &HardwareTuner{
+		Distro: distro,
+	}
+}
+
+// Run performs the hardware check
+func (ht *HardwareTuner) Run() error {
+	PrintStep("Virtual Hardware Inspector")
+
+	// 1. Check Network Adapter Type
+	PrintInfo("Checking Network Adapter...")
+	// Get interface name
+	cmd := exec.Command("ip", "-o", "link", "show")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		foundVmxnet3 := false
+		for _, line := range lines {
+			if strings.Contains(line, "link/ether") {
+				parts := strings.Fields(line)
+				if len(parts) > 1 {
+					iface := strings.Trim(parts[1], ":")
+					// Check driver
+					driverCmd := exec.Command("ethtool", "-i", iface)
+					driverOut, _ := driverCmd.Output()
+					if strings.Contains(string(driverOut), "driver: vmxnet3") {
+						foundVmxnet3 = true
+						PrintSuccess("Interface %s is using vmxnet3 driver", iface)
+					} else if strings.Contains(string(driverOut), "driver: e1000") {
+						PrintWarning("Interface %s is using legacy e1000 driver (Upgrade to vmxnet3 recommended)", iface)
+					}
+				}
+			}
+		}
+		if !foundVmxnet3 {
+			PrintInfo("No vmxnet3 adapters found (or ethtool missing)")
+		}
+	}
+
+	// 2. Check SCSI Controller
+	PrintInfo("Checking SCSI Controller...")
+	// lspci is best, but might not be installed.
+	// Try installing pciutils if missing? No, read-only check shouldn't install stuff ideally.
+	// Let's try to detect via sysfs or dmesg
+	
+	// Check for vmw_pvscsi or nvme module
+	if out, err := exec.Command("lsmod").Output(); err == nil {
+		output := string(out)
+		if strings.Contains(output, "vmw_pvscsi") {
+			PrintSuccess("VMware Paravirtual SCSI (PVSCSI) driver loaded")
+		} else if strings.Contains(output, "nvme") {
+			PrintSuccess("NVMe Controller detected (High Performance)")
+		} else if strings.Contains(output, "mptspi") || strings.Contains(output, "mptsas") {
+			PrintInfo("Detected LSI Logic Controller (Standard)")
+			PrintInfo("Recommendation: Upgrade to VMware Paravirtual (PVSCSI) for better I/O performance")
+		} else {
+			// Check if it's built-in or just not used
+			PrintWarning("Optimal Storage Controller not found (PVSCSI/NVMe)")
+		}
+	}
+
+	// 3. Check 3D Acceleration (often unnecessary on servers)
+	// Hard to check from guest without logs, skip for now.
+
+	return nil
+}
+
+
+========================================
+File: info.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\info.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// InfoTuner handles system info display
+type InfoTuner struct{}
+
+// NewInfoTuner creates a new info tuner
+func NewInfoTuner() *InfoTuner {
+	return &InfoTuner{}
+}
+
+// Run displays the info
+func (it *InfoTuner) Run() error {
+	PrintStep("System Information")
+
+	// 1. OS Info
+	osInfo := "Unknown"
+	if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				osInfo = strings.Trim(line[12:], "\"")
+				break
+			}
+		}
+	}
+	fmt.Printf("  %-20s: %s\n", "OS", osInfo)
+
+	// 2. Kernel
+	if out, err := exec.Command("uname", "-r").Output(); err == nil {
+		fmt.Printf("  %-20s: %s", "Kernel", string(out))
+	}
+
+	// 3. CPU
+	// grep -c processor /proc/cpuinfo
+	if out, err := exec.Command("bash", "-c", "grep -c processor /proc/cpuinfo").Output(); err == nil {
+		fmt.Printf("  %-20s: %s", "vCPUs", string(out))
+	}
+
+	// 4. Memory
+	// free -h | grep Mem | awk '{print $2}'
+	if out, err := exec.Command("bash", "-c", "free -h | grep Mem").Output(); err == nil {
+		parts := strings.Fields(string(out))
+		if len(parts) >= 3 {
+			fmt.Printf("  %-20s: %s (Used: %s)\n", "Memory", parts[1], parts[2])
+		}
+	}
+
+	// 5. IP Address
+	// hostname -I | awk '{print $1}'
+	if out, err := exec.Command("hostname", "-I").Output(); err == nil {
+		ips := strings.TrimSpace(string(out))
+		firstIp := strings.Split(ips, " ")[0]
+		fmt.Printf("  %-20s: %s\n", "IP Address", firstIp)
+	}
+
+	// 6. VM Tools Status
+	fmt.Printf("  %-20s: ", "VMware Tools")
+	if err := exec.Command("systemctl", "is-active", "vmtoolsd").Run(); err == nil {
+		PrintSuccess("Running")
+	} else {
+		PrintWarning("Not Running")
+	}
+
+	return nil
+}
+
+
+========================================
+File: logdoctor.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\logdoctor.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// LogDoctorTuner handles log scanning
+type LogDoctorTuner struct {
+	Distro *DistroManager
+}
+
+// NewLogDoctorTuner creates a new log doctor
+func NewLogDoctorTuner(distro *DistroManager) *LogDoctorTuner {
+	return &LogDoctorTuner{
+		Distro: distro,
+	}
+}
+
+// Run performs the log scan
+func (ld *LogDoctorTuner) Run() error {
+	PrintStep("Log Doctor (Troubleshoot)")
+
+	keywords := []string{
+		"Out of memory",
+		"Kill process",
+		"I/O error",
+		"SCSI error",
+		"Call Trace",
+		"soft lockup",
+		"segfault",
+		"EXT4-fs error",
+		"XFS_WANT_CORRUPT",
+	}
+
+	foundIssues := false
+
+	// 1. Check dmesg (Kernel Ring Buffer)
+	PrintInfo("Scanning kernel ring buffer (dmesg)...")
+	out, err := exec.Command("dmesg").Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		// Check last 1000 lines to avoid noise from boot time if uptime is long
+		start := 0
+		if len(lines) > 1000 {
+			start = len(lines) - 1000
+		}
+		
+		for i := start; i < len(lines); i++ {
+			line := lines[i]
+			for _, kw := range keywords {
+				if strings.Contains(line, kw) {
+					PrintWarning("Found in dmesg: %s", line)
+					foundIssues = true
+				}
+			}
+		}
+	}
+
+	// 2. Check System Log
+	logFile := "/var/log/syslog"
+	if ld.Distro.Type == DistroRHEL {
+		logFile = "/var/log/messages"
+	}
+
+	PrintInfo("Scanning system log (%s)...", logFile)
+	if _, err := os.Stat(logFile); err == nil {
+		// Use grep for efficiency
+		for _, kw := range keywords {
+			// grep -i "keyword" /var/log/syslog | tail -n 5
+			cmd := exec.Command("bash", "-c", fmt.Sprintf("grep -i \"%s\" %s | tail -n 5", kw, logFile))
+			out, err := cmd.Output()
+			if err == nil && len(out) > 0 {
+				PrintWarning("Found '%s' errors:", kw)
+				fmt.Println(string(out))
+				foundIssues = true
+			}
+		}
+	} else {
+		PrintInfo("Log file not found: %s", logFile)
+	}
+
+	if !foundIssues {
+		PrintSuccess("No critical errors found in recent logs.")
+	} else {
+		fmt.Println()
+		PrintInfo("Issues were found. Please investigate the logs further.")
+	}
+
+	return nil
+}
+
+
+========================================
+File: network.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\network.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// NetworkTuner handles network optimization
+type NetworkTuner struct {
+	ServicePath string
+	DryRun      bool
+}
+
+// NewNetworkTuner creates a new network tuner
+func NewNetworkTuner(dryRun bool) *NetworkTuner {
+	return &NetworkTuner{
+		ServicePath: "/etc/systemd/system/network-tuning.service",
+		DryRun:      dryRun,
+	}
+}
+
+// GetSystemdService returns the systemd service for network tuning
+func (nt *NetworkTuner) GetSystemdService() string {
+	return `[Unit]
+Description=Network Performance Tuning for VMware
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainOnExit=yes
+
+# Increase ring buffers (ONLY for vmxnet3 to avoid e1000 hangs)
+ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; fi; done'
+
+# Enable hardware offloading features (ONLY for vmxnet3)
+ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -K $iface gso on gro on tso on 2>/dev/null || true; fi; done'
+
+# Set interrupt coalescing (ONLY for vmxnet3)
+ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; fi; done'
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
+// Apply applies network optimizations
+func (nt *NetworkTuner) Apply(backup *BackupManager) error {
+	PrintStep("Configuring network optimizations")
+
+	service := nt.GetSystemdService()
+
+	if nt.DryRun {
+		PrintInfo("Would create: %s", nt.ServicePath)
+		PrintInfo("Service file preview:")
+		fmt.Println(service)
+		return nil
+	}
+
+	// Backup existing service if it exists
+	if err := backup.BackupFile(nt.ServicePath); err != nil {
+		return fmt.Errorf("failed to backup network service: %w", err)
+	}
+
+	// Write systemd service
+	if err := os.WriteFile(nt.ServicePath, []byte(service), 0644); err != nil {
+		return fmt.Errorf("failed to write network service: %w", err)
+	}
+
+	PrintSuccess("Created %s", nt.ServicePath)
+
+	// Reload systemd
+	PrintInfo("Reloading systemd daemon...")
+	cmd := exec.Command("systemctl", "daemon-reload")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		PrintWarning("Failed to reload systemd: %v", err)
+		fmt.Println(string(output))
+	}
+
+	// Enable the service
+	PrintInfo("Enabling network tuning service...")
+	cmd = exec.Command("systemctl", "enable", "network-tuning.service")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		PrintWarning("Failed to enable service: %v", err)
+		fmt.Println(string(output))
+	}
+
+	// Start the service (apply changes now)
+	PrintInfo("Starting network tuning service...")
+	cmd = exec.Command("systemctl", "start", "network-tuning.service")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		PrintWarning("Failed to start service: %v", err)
+		fmt.Println(string(output))
+		PrintWarning("Network tuning will be applied on next boot")
+	} else {
+		PrintSuccess("Network tuning applied immediately")
+	}
+
+	return nil
+}
+
+// ShowCurrent displays current network settings
+func (nt *NetworkTuner) ShowCurrent() error {
+	PrintStep("Current network interface settings")
+
+	// Get network interfaces
+	interfaces, err := nt.getNetworkInterfaces()
+	if err != nil {
+		return err
+	}
+
+	for _, iface := range interfaces {
+		fmt.Printf("\n  Interface: %s\n", iface)
+
+		// Get ring buffer settings
+		cmd := exec.Command("ethtool", "-g", iface)
+		if output, err := cmd.Output(); err == nil {
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "Current") || strings.Contains(line, "RX") || strings.Contains(line, "TX") {
+					fmt.Printf("    %s\n", strings.TrimSpace(line))
+				}
+			}
+		}
+
+		// Get offload features
+		cmd = exec.Command("ethtool", "-k", iface)
+		if output, err := cmd.Output(); err == nil {
+			features := []string{"tcp-segmentation-offload", "generic-receive-offload", "generic-segmentation-offload"}
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				for _, feature := range features {
+					if strings.Contains(line, feature+":") {
+						fmt.Printf("    %s\n", strings.TrimSpace(line))
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// getNetworkInterfaces returns a list of network interfaces
+func (nt *NetworkTuner) getNetworkInterfaces() ([]string, error) {
+	cmd := exec.Command("bash", "-c", "ls /sys/class/net/ | grep -E '^(ens|eth)'")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network interfaces: %w", err)
+	}
+
+	interfaces := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(interfaces) == 1 && interfaces[0] == "" {
+		return []string{}, nil
+	}
+
+	return interfaces, nil
+}
+
+// Verify checks if the network tuning service exists
+func (nt *NetworkTuner) Verify() error {
+	if _, err := os.Stat(nt.ServicePath); os.IsNotExist(err) {
+		return fmt.Errorf("network tuning service not found: %s", nt.ServicePath)
+	}
+
+	PrintSuccess("Network tuning service exists")
+
+	// Check if service is enabled
+	cmd := exec.Command("systemctl", "is-enabled", "network-tuning.service")
+	if output, err := cmd.Output(); err == nil {
+		status := strings.TrimSpace(string(output))
+		if status == "enabled" {
+			PrintSuccess("Network tuning service is enabled")
+		} else {
+			PrintWarning("Network tuning service is not enabled")
+		}
+	}
+
+	return nil
+}
+
+// CheckPacketDrops checks for packet drops on all interfaces using ethtool -S
+func (nt *NetworkTuner) CheckPacketDrops() error {
+	PrintStep("Checking for network packet drops")
+
+	interfaces, err := nt.getNetworkInterfaces()
+	if err != nil {
+		return err
+	}
+
+	for _, iface := range interfaces {
+		fmt.Printf("Interface: %s\n", iface)
+
+		// Use RunCommandSilent from exec_utils (we need to export it or duplicate logic if not exported?
+		// Actually I added RunCommandSilent to generic package, let's check if I can use it.
+		// It is in the same package 'tuner', so yes.)
+		output, err := RunCommandSilent("ethtool", "-S", iface)
+		if err != nil {
+			PrintWarning("  Could not get statistics: %v", err)
+			continue
+		}
+
+		lines := strings.Split(output, "\n")
+		dropsFound := false
+		for _, line := range lines {
+			// Look for drop or error keywords
+			if strings.Contains(line, "drop") || strings.Contains(line, "error") {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					// format usually: "rx_dropped: 123"
+					valStr := parts[len(parts)-1]
+					if valStr != "0" {
+						PrintWarning("  %s", strings.TrimSpace(line))
+						dropsFound = true
+					}
+				}
+			}
+		}
+
+		if !dropsFound {
+			PrintSuccess("  No packet drops or errors detected")
+		}
+	}
+	return nil
+}
+
+
+========================================
+File: scheduler.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\scheduler.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// SchedulerTuner handles I/O scheduler optimization
+type SchedulerTuner struct {
+	UdevRulePath string
+	DryRun       bool
+}
+
+// NewSchedulerTuner creates a new scheduler tuner
+func NewSchedulerTuner(dryRun bool) *SchedulerTuner {
+	return &SchedulerTuner{
+		UdevRulePath: "/etc/udev/rules.d/60-scheduler.rules",
+		DryRun:       dryRun,
+	}
+}
+
+// GetUdevRules returns the udev rules for I/O scheduler
+func (st *SchedulerTuner) GetUdevRules() string {
+	return `# I/O Scheduler optimization for VMware VMs
+# Generated by vmware-tuner
+
+# Use 'none' (or 'noop' on older kernels) for all block devices
+# This is optimal for VMs as the hypervisor handles I/O scheduling
+
+# For SSDs and virtual disks (rotational=0)
+ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="none"
+
+# For HDDs (rotational=1) - still use none in VMs
+ACTION=="add|change", KERNEL=="sd[a-z]|nvme[0-9]n[0-9]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="none"
+
+# VMware PVSCSI devices
+ACTION=="add|change", KERNEL=="sd[a-z]", DRIVERS=="vmw_pvscsi", ATTR{queue/scheduler}="none"
+
+# Increase queue depth for better performance
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/nr_requests}="256"
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/nr_requests}="256"
+
+# Read-ahead optimization (in KB)
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{bdi/read_ahead_kb}="256"
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{bdi/read_ahead_kb}="256"
+`
+}
+
+// Apply applies I/O scheduler optimizations
+func (st *SchedulerTuner) Apply(backup *BackupManager) error {
+	PrintStep("Configuring I/O scheduler")
+
+	rules := st.GetUdevRules()
+
+	if st.DryRun {
+		PrintInfo("Would create: %s", st.UdevRulePath)
+		PrintInfo("Udev rules preview:")
+		fmt.Println(rules)
+		return nil
+	}
+
+	// Backup existing rules if they exist
+	if err := backup.BackupFile(st.UdevRulePath); err != nil {
+		return fmt.Errorf("failed to backup udev rules: %w", err)
+	}
+
+	// Write udev rules
+	if err := os.WriteFile(st.UdevRulePath, []byte(rules), 0644); err != nil {
+		return fmt.Errorf("failed to write udev rules: %w", err)
+	}
+
+	PrintSuccess("Created %s", st.UdevRulePath)
+
+	// Reload udev rules
+	PrintInfo("Reloading udev rules...")
+	cmd := exec.Command("udevadm", "control", "--reload-rules")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		PrintWarning("Failed to reload udev rules: %v", err)
+		fmt.Println(string(output))
+	} else {
+		PrintSuccess("Udev rules reloaded")
+	}
+
+	// Apply to current block devices immediately
+	if err := st.ApplyToCurrentDevices(); err != nil {
+		PrintWarning("Some devices may require a reboot for scheduler changes")
+	}
+
+	return nil
+}
+
+// ApplyToCurrentDevices applies scheduler changes to currently attached devices
+func (st *SchedulerTuner) ApplyToCurrentDevices() error {
+	PrintInfo("Applying I/O scheduler to current devices...")
+
+	// Find all block devices
+	devices, err := filepath.Glob("/sys/block/sd*")
+	if err != nil {
+		return err
+	}
+
+	nvmeDevices, _ := filepath.Glob("/sys/block/nvme*")
+	devices = append(devices, nvmeDevices...)
+
+	successCount := 0
+	failCount := 0
+
+	for _, device := range devices {
+		deviceName := filepath.Base(device)
+		schedulerPath := filepath.Join(device, "queue", "scheduler")
+
+		// Set scheduler to 'none'
+		if err := st.setScheduler(schedulerPath, "none"); err != nil {
+			// Try 'noop' as fallback (older kernels)
+			if err := st.setScheduler(schedulerPath, "noop"); err != nil {
+				PrintWarning("Failed to set scheduler for %s: %v", deviceName, err)
+				failCount++
+				continue
+			}
+		}
+
+		// Set nr_requests
+		nrRequestsPath := filepath.Join(device, "queue", "nr_requests")
+		if err := os.WriteFile(nrRequestsPath, []byte("256"), 0644); err != nil {
+			// Not critical, just warn
+			PrintWarning("Could not set nr_requests for %s", deviceName)
+		}
+
+		// Set read_ahead_kb
+		readAheadPath := filepath.Join(device, "bdi", "read_ahead_kb")
+		if err := os.WriteFile(readAheadPath, []byte("256"), 0644); err != nil {
+			// Not critical, just warn
+			PrintWarning("Could not set read_ahead_kb for %s", deviceName)
+		}
+
+		successCount++
+		PrintSuccess("Configured %s", deviceName)
+	}
+
+	if successCount > 0 {
+		PrintSuccess("Applied I/O scheduler to %d device(s)", successCount)
+	}
+	if failCount > 0 {
+		return fmt.Errorf("failed to configure %d device(s)", failCount)
+	}
+
+	return nil
+}
+
+// setScheduler sets the I/O scheduler for a device
+func (st *SchedulerTuner) setScheduler(schedulerPath, scheduler string) error {
+	return os.WriteFile(schedulerPath, []byte(scheduler), 0644)
+}
+
+// ShowCurrent displays current I/O scheduler settings
+func (st *SchedulerTuner) ShowCurrent() error {
+	PrintStep("Current I/O scheduler settings")
+
+	// Find all block devices
+	devices, err := filepath.Glob("/sys/block/sd*")
+	if err != nil {
+		return err
+	}
+
+	nvmeDevices, _ := filepath.Glob("/sys/block/nvme*")
+	devices = append(devices, nvmeDevices...)
+
+	if len(devices) == 0 {
+		PrintWarning("No block devices found")
+		return nil
+	}
+
+	for _, device := range devices {
+		deviceName := filepath.Base(device)
+		schedulerPath := filepath.Join(device, "queue", "scheduler")
+
+		data, err := os.ReadFile(schedulerPath)
+		if err != nil {
+			PrintWarning("Could not read scheduler for %s", deviceName)
+			continue
+		}
+
+		// Extract current scheduler (marked with [brackets])
+		schedulerLine := strings.TrimSpace(string(data))
+		current := "unknown"
+
+		// Find scheduler in brackets
+		if start := strings.Index(schedulerLine, "["); start != -1 {
+			if end := strings.Index(schedulerLine[start:], "]"); end != -1 {
+				current = schedulerLine[start+1 : start+end]
+			}
+		}
+
+		// Get read-ahead value
+		readAheadPath := filepath.Join(device, "bdi", "read_ahead_kb")
+		readAhead := "N/A"
+		if data, err := os.ReadFile(readAheadPath); err == nil {
+			readAhead = strings.TrimSpace(string(data)) + " KB"
+		}
+
+		// Get queue depth
+		nrRequestsPath := filepath.Join(device, "queue", "nr_requests")
+		nrRequests := "N/A"
+		if data, err := os.ReadFile(nrRequestsPath); err == nil {
+			nrRequests = strings.TrimSpace(string(data))
+		}
+
+		fmt.Printf("\n  Device: %s\n", deviceName)
+		fmt.Printf("  Scheduler: %s\n", current)
+		fmt.Printf("  Read-ahead: %s\n", readAhead)
+		fmt.Printf("  Queue depth: %s\n", nrRequests)
+	}
+
+	return nil
+}
+
+// Verify checks if the udev rules have been applied
+func (st *SchedulerTuner) Verify() error {
+	if _, err := os.Stat(st.UdevRulePath); os.IsNotExist(err) {
+		return fmt.Errorf("udev rules file not found: %s", st.UdevRulePath)
+	}
+
+	PrintSuccess("I/O scheduler udev rules exist")
+	return nil
+}
+
+
+========================================
+File: ssh.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\ssh.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// SSHTuner handles SSH hardening
+type SSHTuner struct {
+	Backup *BackupManager
+}
+
+// NewSSHTuner creates a new SSH tuner
+func NewSSHTuner(backup *BackupManager) *SSHTuner {
+	return &SSHTuner{
+		Backup: backup,
+	}
+}
+
+// Run performs the SSH hardening
+func (st *SSHTuner) Run() error {
+	PrintStep("SSH Hardening")
+
+	PrintWarning("⚠️  WARNING: Incorrect SSH configuration can lock you out!")
+	PrintWarning("Ensure you have console access (VMware Remote Console) or a backup session.")
+	fmt.Println()
+	
+	configPath := "/etc/ssh/sshd_config"
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return fmt.Errorf("sshd_config not found at %s", configPath)
+	}
+
+	// Backup first
+	if err := st.Backup.BackupFile(configPath); err != nil {
+		return fmt.Errorf("failed to backup sshd_config: %w", err)
+	}
+	PrintSuccess("Backed up sshd_config")
+
+	// Read config
+	contentBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	content := string(contentBytes)
+
+	// Ask questions
+	changes := false
+
+	// 1. Disable Root Login
+	if !strings.Contains(content, "PermitRootLogin no") {
+		fmt.Print("Disable SSH Root Login? (y/n): ")
+		var resp string
+		fmt.Scanln(&resp)
+		if resp == "y" {
+			// Replace or append
+			if strings.Contains(content, "PermitRootLogin") {
+				// Simple replace (regex would be better but keeping it simple/safe)
+				// We'll just append the override at the end, usually works for sshd
+				content += "\n# Added by vmware-tuner\nPermitRootLogin no\n"
+			} else {
+				content += "\n# Added by vmware-tuner\nPermitRootLogin no\n"
+			}
+			changes = true
+		}
+	} else {
+		PrintSuccess("Root login already disabled")
+	}
+
+	// 2. Disable Password Auth
+	if !strings.Contains(content, "PasswordAuthentication no") {
+		fmt.Print("Disable Password Authentication (Keys only)? (y/n): ")
+		var resp string
+		fmt.Scanln(&resp)
+		if resp == "y" {
+			content += "\n# Added by vmware-tuner\nPasswordAuthentication no\n"
+			changes = true
+		}
+	} else {
+		PrintSuccess("Password authentication already disabled")
+	}
+
+	if !changes {
+		PrintInfo("No changes made")
+		return nil
+	}
+
+	// Write new config
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("failed to write sshd_config: %w", err)
+	}
+
+	// Verify Config
+	PrintInfo("Verifying configuration syntax...")
+	cmd := exec.Command("sshd", "-t")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		PrintError("Configuration check FAILED: %v", err)
+		PrintInfo("Output: %s", string(output))
+		PrintWarning("Restoring backup immediately...")
+		
+		// Restore
+		backupPath := st.Backup.GetBackupPath("sshd_config")
+		exec.Command("cp", backupPath, configPath).Run()
+		return fmt.Errorf("safety check failed, changes reverted")
+	}
+
+	PrintSuccess("Configuration syntax verified")
+
+	// Restart Service
+	fmt.Print("Restart SSH service to apply? (y/n): ")
+	var resp string
+	fmt.Scanln(&resp)
+	if resp == "y" {
+		exec.Command("systemctl", "restart", "sshd").Run()
+		PrintSuccess("SSH service restarted")
+	} else {
+		PrintInfo("Changes saved but service not restarted")
+	}
+
+	return nil
+}
+
+
+========================================
+File: swap.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\swap.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// SwapTuner handles swap management
+type SwapTuner struct{}
+
+// NewSwapTuner creates a new swap tuner
+func NewSwapTuner() *SwapTuner {
+	return &SwapTuner{}
+}
+
+// Run performs the swap check and creation
+func (st *SwapTuner) Run() error {
+	PrintStep("Swap Manager")
+
+	// 1. Check current swap
+	cmd := exec.Command("swapon", "--show")
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		PrintSuccess("Swap is currently active:")
+		fmt.Println(string(out))
+		return nil
+	}
+
+	PrintWarning("No active swap detected!")
+	PrintInfo("Running without swap can cause the OOM Killer to crash applications.")
+	fmt.Println()
+	fmt.Print("Create a 2GB swapfile? (y/n): ")
+	
+	var response string
+	fmt.Scanln(&response)
+	if response != "y" && response != "yes" {
+		PrintInfo("Cancelled")
+		return nil
+	}
+
+	swapFile := "/swapfile"
+
+	// 2. Create file
+	PrintInfo("Creating 2GB swapfile at %s...", swapFile)
+	// Try fallocate first (fast)
+	if err := exec.Command("fallocate", "-l", "2G", swapFile).Run(); err != nil {
+		PrintInfo("fallocate failed, trying dd...")
+		// dd if=/dev/zero of=/swapfile bs=1M count=2048
+		if err := exec.Command("dd", "if=/dev/zero", "of="+swapFile, "bs=1M", "count=2048").Run(); err != nil {
+			return fmt.Errorf("failed to create swapfile: %w", err)
+		}
+	}
+
+	// 3. Permissions
+	os.Chmod(swapFile, 0600)
+
+	// 4. Mkswap
+	PrintInfo("Formatting swap...")
+	if err := exec.Command("mkswap", swapFile).Run(); err != nil {
+		return fmt.Errorf("mkswap failed: %w", err)
+	}
+
+	// 5. Swapon
+	PrintInfo("Activating swap...")
+	if err := exec.Command("swapon", swapFile).Run(); err != nil {
+		return fmt.Errorf("swapon failed: %w", err)
+	}
+
+	// 6. Persist in fstab
+	PrintInfo("Updating /etc/fstab...")
+	fstabEntry := fmt.Sprintf("%s none swap sw 0 0\n", swapFile)
+	
+	// Read fstab to check if already exists
+	content, _ := os.ReadFile("/etc/fstab")
+	if !strings.Contains(string(content), swapFile) {
+		f, err := os.OpenFile("/etc/fstab", os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			PrintWarning("Failed to open fstab: %v", err)
+		} else {
+			defer f.Close()
+			if _, err := f.WriteString(fstabEntry); err != nil {
+				PrintWarning("Failed to write to fstab: %v", err)
+			} else {
+				PrintSuccess("Added to /etc/fstab")
+			}
+		}
+	}
+
+	PrintSuccess("Swap created successfully!")
+	return nil
+}
+
+
+========================================
+File: sysctl.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\sysctl.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// SysctlTuner handles sysctl parameter tuning
+type SysctlTuner struct {
+	ConfigPath string
+	DryRun     bool
+}
+
+// NewSysctlTuner creates a new sysctl tuner
+func NewSysctlTuner(dryRun bool) *SysctlTuner {
+	return &SysctlTuner{
+		ConfigPath: "/etc/sysctl.d/99-vmware-performance.conf",
+		DryRun:     dryRun,
+	}
+}
+
+// GetOptimalConfig returns the optimal sysctl configuration for VMware VMs
+func (st *SysctlTuner) GetOptimalConfig() string {
+	return `# VMware VM Performance Tuning Configuration
+# Generated by vmware-tuner
+# Date: ` + getCurrentTimestamp() + `
+
+# ============================================
+# Memory Management
+# ============================================
+
+# Reduce swap usage (recommended for VMs with sufficient RAM)
+# Default: 60, Tuned: 10
+vm.swappiness = 10
+
+# Percentage of system memory that can be filled with dirty pages before
+# processes are forced to write dirty buffers themselves during their time slice
+# Default: 20, Tuned: 15
+vm.dirty_ratio = 15
+
+# Percentage of system memory that can be filled with dirty pages before
+# pdflush/flush/kdmflush starts writing them out
+# Default: 10, Tuned: 5
+vm.dirty_background_ratio = 5
+
+# Tendency of the kernel to reclaim memory used for caching
+# Default: 100, Tuned: 50 (keeps more cache)
+vm.vfs_cache_pressure = 50
+
+# ============================================
+# Network Performance
+# ============================================
+
+# Maximum socket receive buffer
+net.core.rmem_max = 134217728
+
+# Maximum socket send buffer
+net.core.wmem_max = 134217728
+
+# Default socket receive buffer
+net.core.rmem_default = 16777216
+
+# Default socket send buffer
+net.core.wmem_default = 16777216
+
+# Maximum number of packets queued on the INPUT side
+net.core.netdev_max_backlog = 5000
+
+# TCP receive buffer size (min, default, max)
+net.ipv4.tcp_rmem = 4096 87380 67108864
+
+# TCP write buffer size (min, default, max)
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# TCP congestion control algorithm (BBR for better throughput)
+net.ipv4.tcp_congestion_control = bbr
+
+# Enable MTU probing
+net.ipv4.tcp_mtu_probing = 1
+
+# Enable TCP window scaling
+net.ipv4.tcp_window_scaling = 1
+
+# Enable TCP timestamps
+net.ipv4.tcp_timestamps = 1
+
+# Enable selective acknowledgments
+net.ipv4.tcp_sack = 1
+
+# Disable TCP slow start after idle
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# ============================================
+# File System
+# ============================================
+
+# Maximum number of file handles
+fs.file-max = 2097152
+
+# Maximum number of async I/O requests
+fs.aio-max-nr = 1048576
+
+# ============================================
+# Kernel
+# ============================================
+
+# Increase the maximum number of memory map areas a process may have
+vm.max_map_count = 262144
+`
+}
+
+// Apply applies the sysctl configuration
+func (st *SysctlTuner) Apply(backup *BackupManager) error {
+	PrintStep("Configuring sysctl parameters")
+
+	// Backup existing config if it exists
+	if !st.DryRun {
+		if err := backup.BackupFile(st.ConfigPath); err != nil {
+			return fmt.Errorf("failed to backup sysctl config: %w", err)
+		}
+	}
+
+	config := st.GetOptimalConfig()
+
+	if st.DryRun {
+		PrintInfo("Would create: %s", st.ConfigPath)
+		PrintInfo("Configuration preview:")
+		fmt.Println(config)
+		return nil
+	}
+
+	// Write configuration file
+	if err := os.WriteFile(st.ConfigPath, []byte(config), 0644); err != nil {
+		return fmt.Errorf("failed to write sysctl config: %w", err)
+	}
+
+	PrintSuccess("Created %s", st.ConfigPath)
+
+	// Apply sysctl settings immediately
+	PrintInfo("Applying sysctl settings...")
+	cmd := exec.Command("sysctl", "-p", st.ConfigPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		PrintWarning("Some sysctl parameters may have failed to apply:")
+		fmt.Println(string(output))
+		PrintWarning("This is normal if BBR congestion control is not available")
+	} else {
+		PrintSuccess("Sysctl parameters applied successfully")
+	}
+
+	return nil
+}
+
+// ShowCurrent displays current sysctl values
+func (st *SysctlTuner) ShowCurrent() error {
+	PrintStep("Current sysctl values")
+
+	params := []string{
+		"vm.swappiness",
+		"vm.dirty_ratio",
+		"vm.dirty_background_ratio",
+		"vm.vfs_cache_pressure",
+		"net.core.rmem_max",
+		"net.core.wmem_max",
+		"net.ipv4.tcp_congestion_control",
+		"fs.file-max",
+	}
+
+	for _, param := range params {
+		cmd := exec.Command("sysctl", "-n", param)
+		output, err := cmd.Output()
+		if err != nil {
+			PrintWarning("Could not read %s", param)
+			continue
+		}
+
+		value := strings.TrimSpace(string(output))
+		fmt.Printf("  %s = %s\n", param, value)
+	}
+
+	return nil
+}
+
+// Verify checks if the sysctl configuration has been applied
+func (st *SysctlTuner) Verify() error {
+	if _, err := os.Stat(st.ConfigPath); os.IsNotExist(err) {
+		return fmt.Errorf("configuration file not found: %s", st.ConfigPath)
+	}
+
+	PrintSuccess("Sysctl configuration file exists")
+	return nil
+}
+
+
+========================================
+File: template.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\template.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+)
+
+// TemplateTuner handles VM sealing
+type TemplateTuner struct{}
+
+// NewTemplateTuner creates a new template tuner
+func NewTemplateTuner() *TemplateTuner {
+	return &TemplateTuner{}
+}
+
+// Run performs the sealing process
+func (tt *TemplateTuner) Run() error {
+	PrintStep("Seal VM for Template")
+
+	PrintWarning("⚠️  DANGER ZONE ⚠️")
+	PrintWarning("This will remove unique system identifiers (Machine ID, SSH Keys, Logs).")
+	PrintWarning("The VM will be shut down immediately after.")
+	PrintWarning("DO NOT RUN THIS if you are not creating a template/golden image.")
+	fmt.Println()
+	
+	fmt.Print("Type 'SEAL' to continue: ")
+	var response string
+	fmt.Scanln(&response)
+	
+	if response != "SEAL" {
+		PrintInfo("Operation cancelled (Safety check failed)")
+		return nil
+	}
+
+	PrintInfo("Preparing system for templating...")
+
+	// 1. Clean Machine ID
+	// /etc/machine-id should be empty, not missing, for systemd to regenerate it
+	PrintInfo("Resetting Machine ID...")
+	if err := os.Truncate("/etc/machine-id", 0); err != nil {
+		PrintWarning("Failed to truncate /etc/machine-id: %v", err)
+	}
+	os.Remove("/var/lib/dbus/machine-id")
+
+	// 2. Remove SSH Host Keys
+	PrintInfo("Removing SSH Host Keys...")
+	exec.Command("rm", "-f", "/etc/ssh/ssh_host_*").Run()
+
+	// 3. Clean Logs
+	PrintInfo("Vacuuming logs...")
+	exec.Command("journalctl", "--vacuum-time=1s").Run()
+	exec.Command("rm", "-f", "/var/log/*.gz").Run()
+	exec.Command("rm", "-f", "/var/log/*.[0-9]").Run()
+
+	// 4. Clean Bash History
+	PrintInfo("Clearing shell history...")
+	os.Remove("/root/.bash_history")
+	exec.Command("history", "-c").Run()
+
+	// 5. Clean Package Cache (Reuse logic if possible, but simple command here is fine)
+	PrintInfo("Cleaning package cache...")
+	exec.Command("apt-get", "clean").Run()
+	exec.Command("yum", "clean", "all").Run()
+
+	PrintSuccess("System sealed successfully!")
+	PrintInfo("Shutting down in 3 seconds...")
+	
+	exec.Command("sleep", "3").Run()
+	exec.Command("poweroff").Run()
+
+	return nil
+}
+
+
+========================================
+File: timesync.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\timesync.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os/exec"
+)
+
+// TimeSyncTuner handles time synchronization
+type TimeSyncTuner struct {
+	Distro *DistroManager
+}
+
+// NewTimeSyncTuner creates a new time sync tuner
+func NewTimeSyncTuner(distro *DistroManager) *TimeSyncTuner {
+	return &TimeSyncTuner{
+		Distro: distro,
+	}
+}
+
+// Run performs the time sync check and fix
+func (t *TimeSyncTuner) Run() error {
+	PrintStep("Time Synchronization Doctor")
+
+	// 1. Check for existing NTP services
+	services := []string{"chronyd", "ntp", "systemd-timesyncd"}
+	activeService := ""
+
+	for _, svc := range services {
+		cmd := exec.Command("systemctl", "is-active", svc)
+		if err := cmd.Run(); err == nil {
+			activeService = svc
+			break
+		}
+	}
+
+	if activeService != "" {
+		PrintSuccess("Time synchronization is active via: %s", activeService)
+		
+		// Force sync
+		PrintInfo("Forcing time synchronization...")
+		if activeService == "chronyd" {
+			exec.Command("chronyc", "makestep").Run()
+		} else if activeService == "systemd-timesyncd" {
+			// systemd-timesyncd doesn't have a simple force command, restart triggers it
+			exec.Command("systemctl", "restart", "systemd-timesyncd").Run()
+		}
+		
+		// Ensure VMware Tools sync is disabled to avoid conflict
+		PrintInfo("Disabling VMware Tools periodic time sync (best practice with NTP)...")
+		exec.Command("vmware-toolbox-cmd", "timesync", "disable").Run()
+		
+		return nil
+	}
+
+	PrintWarning("No active NTP service found!")
+	
+	// 2. If no NTP, offer to enable VMware Tools sync or install chrony
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  [1] Install/Enable Chrony (Recommended)")
+	fmt.Println("  [2] Enable VMware Tools Host Sync (Fallback)")
+	fmt.Println("  [3] Skip")
+	fmt.Print("Choice: ")
+	
+	var choice string
+	fmt.Scanln(&choice)
+
+	if choice == "1" {
+		pkg := "chrony"
+		if t.Distro.Type == DistroDebian {
+			pkg = "chrony"
+		}
+		if err := t.Distro.InstallPackage(pkg); err != nil {
+			return err
+		}
+		exec.Command("systemctl", "enable", "--now", "chronyd").Run()
+		exec.Command("chronyc", "makestep").Run()
+		PrintSuccess("Chrony installed and synchronized")
+	} else if choice == "2" {
+		if err := exec.Command("vmware-toolbox-cmd", "timesync", "enable").Run(); err != nil {
+			return fmt.Errorf("failed to enable vmtools sync: %v", err)
+		}
+		PrintSuccess("VMware Tools Host Sync enabled")
+	} else {
+		PrintInfo("Skipping time sync")
+	}
+
+	return nil
+}
+
+
+========================================
+File: update.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\update.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// UpdateTuner handles system updates
+type UpdateTuner struct {
+	Distro *DistroManager
+}
+
+// NewUpdateTuner creates a new update tuner
+func NewUpdateTuner(distro *DistroManager) *UpdateTuner {
+	return &UpdateTuner{
+		Distro: distro,
+	}
+}
+
+// Run performs the update
+func (ut *UpdateTuner) Run(hasInternet bool) error {
+	PrintStep("Safe System Update")
+
+	if !hasInternet {
+		PrintWarning("Mode Hors-Ligne activé : Pas de mises à jour système possibles.")
+		return fmt.Errorf("offline mode")
+	}
+
+	// 1. Check Disk Space
+	PrintInfo("Checking disk space...")
+	cmd := exec.Command("df", "--output=avail", "/")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check disk space: %w", err)
+	}
+
+	// Simple check: ensure we have enough bytes (rough approximation from output)
+	// Real implementation would parse strictly. Here we rely on the user seeing the output if we just show it?
+	// No, let's try to be safer.
+	// Output is like:
+	// Avail
+	// 10240000
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) >= 2 {
+		availStr := strings.TrimSpace(lines[1])
+		var avail int64
+		fmt.Sscanf(availStr, "%d", &avail)
+
+		// df outputs 1K blocks usually
+		availMB := avail / 1024
+		if availMB < 1000 {
+			PrintError("Insufficient disk space! Only %d MB free.", availMB)
+			PrintInfo("At least 1000 MB is recommended for safe updates.")
+			return fmt.Errorf("disk space check failed")
+		}
+		PrintSuccess("Disk space OK (%d MB free)", availMB)
+	}
+
+	// 2. Run Update
+	fmt.Println()
+	PrintInfo("Ready to update system packages.")
+	fmt.Print("Continue? (y/n): ")
+	var resp string
+	fmt.Scanln(&resp)
+	if resp != "y" {
+		PrintInfo("Cancelled")
+		return nil
+	}
+
+	var updateCmd *exec.Cmd
+	if ut.Distro.Type == DistroDebian {
+		// Interactive update
+		cmdStr := "apt-get update && apt-get upgrade"
+		updateCmd = exec.Command("bash", "-c", cmdStr)
+	} else if ut.Distro.Type == DistroRHEL {
+		if _, err := exec.LookPath("dnf"); err == nil {
+			updateCmd = exec.Command("dnf", "update")
+		} else {
+			updateCmd = exec.Command("yum", "update")
+		}
+	} else {
+		return fmt.Errorf("unsupported distribution for auto-update")
+	}
+
+	updateCmd.Stdout = os.Stdout
+	updateCmd.Stderr = os.Stderr
+	updateCmd.Stdin = os.Stdin
+
+	if err := updateCmd.Run(); err != nil {
+		return fmt.Errorf("update failed: %w", err)
+	}
+
+	PrintSuccess("System updated successfully!")
+
+	// 3. Check Reboot
+	rebootNeeded := false
+	if ut.Distro.Type == DistroDebian {
+		if _, err := os.Stat("/var/run/reboot-required"); err == nil {
+			rebootNeeded = true
+		}
+	} else if ut.Distro.Type == DistroRHEL {
+		// needs-restarting -r (yum-utils)
+		if err := exec.Command("needs-restarting", "-r").Run(); err != nil {
+			// Exit code 1 means reboot needed
+			rebootNeeded = true
+		}
+	}
+
+	if rebootNeeded {
+		PrintWarning("A reboot is required to apply updates.")
+		fmt.Print("Reboot now? (y/n): ")
+		fmt.Scanln(&resp)
+		if resp == "y" {
+			exec.Command("reboot").Run()
+		}
+	} else {
+		PrintSuccess("No reboot required.")
+	}
+
+	return nil
+}
+
+
+========================================
+File: utils_test.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\utils_test.go
+========================================
+
+package tuner
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestIsVMware_Detection(t *testing.T) {
+	// Create temporary directory to simulate /sys and /proc
+	tempDir, err := os.MkdirTemp("", "vmware_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Simulate DMI product name
+	dmiDir := filepath.Join(tempDir, "sys", "class", "dmi", "id")
+	if err := os.MkdirAll(dmiDir, 0755); err != nil {
+		t.Fatalf("Failed to create dmi dir: %v", err)
+	}
+
+	productPath := filepath.Join(dmiDir, "product_name")
+	if err := os.WriteFile(productPath, []byte("VMware Virtual Platform"), 0644); err != nil {
+		t.Fatalf("Failed to write product_name: %v", err)
+	}
+
+	// Test positive case
+	isVM, err := IsVMware(tempDir)
+	if err != nil {
+		t.Errorf("IsVMware returned error: %v", err)
+	}
+	if !isVM {
+		t.Error("IsVMware should return true when 'VMware' is in product_name")
+	}
+
+	// Test negative case (overwrite file)
+	if err := os.WriteFile(productPath, []byte("Physical Machine"), 0644); err != nil {
+		t.Fatalf("Failed to overwrite product_name: %v", err)
+	}
+
+	isVM, err = IsVMware(tempDir)
+	if err != nil {
+		t.Errorf("IsVMware returned error: %v", err)
+	}
+	if isVM {
+		t.Error("IsVMware should return false when 'VMware' is NOT in product_name")
+	}
+}
+
+
+========================================
+File: utils.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\utils.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/fatih/color"
+)
+
+var (
+	colorSuccess = color.New(color.FgGreen, color.Bold)
+	colorError   = color.New(color.FgRed, color.Bold)
+	colorWarning = color.New(color.FgYellow, color.Bold)
+	colorInfo    = color.New(color.FgCyan)
+	colorStep    = color.New(color.FgMagenta, color.Bold)
+)
+
+func PrintSuccess(format string, args ...interface{}) {
+	colorSuccess.Print("✓ ")
+	fmt.Printf(format+"\n", args...)
+}
+
+func PrintError(format string, args ...interface{}) {
+	colorError.Print("✗ ")
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+func PrintWarning(format string, args ...interface{}) {
+	colorWarning.Print("⚠ ")
+	fmt.Printf(format+"\n", args...)
+}
+
+func PrintInfo(format string, args ...interface{}) {
+	colorInfo.Print("ℹ ")
+	fmt.Printf(format+"\n", args...)
+}
+
+func PrintStep(format string, args ...interface{}) {
+	fmt.Println()
+	colorStep.Printf("▶ "+format+"\n", args...)
+	fmt.Println("────────────────────────────────────────────────────────")
+}
+
+// CheckConnectivity verifies internet access via HTTP HEAD requests
+// It respects HTTP_PROXY/HTTPS_PROXY environment variables automatically
+func CheckConnectivity() bool {
+	// Use reliable, highly available repositories
+	endpoints := []string{
+		"http://deb.debian.org",
+		"http://mirror.centos.org",
+		"http://github.com",
+	}
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+
+	for _, url := range endpoints {
+		// HEAD is lightweight (headers only)
+		resp, err := client.Head(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			return true
+		}
+	}
+
+	return false
+}
+
+func CheckRoot() error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("ce programme doit être lancé en root (sudo)")
+	}
+	return nil
+}
+
+func FileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func IsVMware(fsRoot string) (bool, error) {
+	// Check DMI product name
+	dmiPath := filepath.Join(fsRoot, "/sys/class/dmi/id/product_name")
+	data, err := os.ReadFile(dmiPath)
+	if err == nil {
+		if strings.Contains(string(data), "VMware") {
+			return true, nil
+		}
+	}
+
+	// Check /proc/cpuinfo
+	cpuInfoPath := filepath.Join(fsRoot, "/proc/cpuinfo")
+	data, err = os.ReadFile(cpuInfoPath)
+	if err == nil {
+		content := string(data)
+		if strings.Contains(content, "VMware") || strings.Contains(content, "hypervisor") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func Banner() {
+	banner := `
+╔══════════════════════════════════════════════════════════╗
+║                                                          ║
+║           VMware VM Performance Tuner                    ║
+║                                                          ║
+║   Optimisé pour Environnements Enterprise (Air-Gapped)   ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
+`
+	colorStep.Println(banner)
+}
+
+func Summary(modules []string) {
+	PrintStep("Résumé des actions")
+	fmt.Println("Les optimisations suivantes seront appliquées :")
+	fmt.Println()
+	for i, module := range modules {
+		fmt.Printf("  %d. %s\n", i+1, module)
+	}
+	fmt.Println()
+}
+
+func CompletionMessage(rebootRequired bool) {
+	fmt.Println()
+	PrintSuccess("Opérations terminées avec succès.")
+	if rebootRequired {
+		PrintWarning("IMPORTANT : Un redémarrage est nécessaire.")
+	}
+	PrintInfo("Backups disponibles dans /root/.vmware-tuner-backups/")
+}
+
+// getCurrentTimestamp returns the current time needed by other modules
+func getCurrentTimestamp() string {
+	return time.Now().Format("20060102-150405")
+}
+
+
+========================================
+File: vmtools.go
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\internal\tuner\vmtools.go
+========================================
+
+package tuner
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+// VMToolsTuner handles open-vm-tools installation and configuration
+type VMToolsTuner struct {
+	Distro *DistroManager
+	DryRun bool
+}
+
+// NewVMToolsTuner creates a new VM tools tuner
+func NewVMToolsTuner(dryRun bool, distro *DistroManager) *VMToolsTuner {
+	return &VMToolsTuner{
+		Distro: distro,
+		DryRun: dryRun,
+	}
+}
+
+// CheckInstalled checks if open-vm-tools is installed
+func (vt *VMToolsTuner) CheckInstalled() bool {
+	_, err := exec.LookPath("vmtoolsd")
+	return err == nil
+}
+
+// Apply installs and enables open-vm-tools
+func (vt *VMToolsTuner) Apply(hasInternet bool) error {
+	PrintStep("Checking VMware Tools")
+
+	if vt.CheckInstalled() {
+		PrintSuccess("open-vm-tools is already installed")
+		return vt.ensureService()
+	}
+
+	PrintInfo("open-vm-tools is missing")
+
+	if !hasInternet {
+		PrintWarning("Mode Hors-Ligne: Impossible d'installer open-vm-tools (pas d'internet)")
+		return nil
+	}
+
+	if vt.DryRun {
+		PrintInfo("Would install open-vm-tools package")
+		return nil
+	}
+
+	// Install package
+	if err := vt.Distro.InstallPackage("open-vm-tools"); err != nil {
+		return fmt.Errorf("failed to install open-vm-tools: %w", err)
+	}
+
+	return vt.ensureService()
+}
+
+// ensureService makes sure the service is running
+func (vt *VMToolsTuner) ensureService() error {
+	if vt.DryRun {
+		return nil
+	}
+
+	// Service name is usually open-vm-tools or vmtoolsd
+	serviceName := "open-vm-tools"
+	if vt.Distro.Type == DistroRHEL {
+		// On RHEL/CentOS it might be vmtoolsd
+		serviceName = "vmtoolsd"
+	}
+
+	PrintInfo("Ensuring %s service is running...", serviceName)
+
+	// Enable
+	exec.Command("systemctl", "enable", serviceName).Run()
+
+	// Start
+	cmd := exec.Command("systemctl", "start", serviceName)
+	if err := cmd.Run(); err != nil {
+		// Try alternative name if failed
+		if serviceName == "open-vm-tools" {
+			serviceName = "vmtoolsd"
+		} else {
+			serviceName = "open-vm-tools"
+		}
+		exec.Command("systemctl", "enable", serviceName).Run()
+		exec.Command("systemctl", "start", serviceName).Run()
+	}
+
+	PrintSuccess("VMware Tools service configured")
+	return nil
+}
+
+// CheckUpdateStatus returns installed, updateAvailable, daysSinceLastUpdate, error
+func (vt *VMToolsTuner) CheckUpdateStatus() (bool, bool, int, error) {
+	if !vt.CheckInstalled() {
+		return false, false, 0, nil
+	}
+
+	// Check binary age
+	binPath, err := exec.LookPath("vmtoolsd")
+	days := 0
+	if err == nil {
+		info, err := os.Stat(binPath)
+		if err == nil {
+			days = int(time.Since(info.ModTime()).Hours() / 24)
+		}
+	}
+
+	// Check for updates
+	updateAvailable := vt.IsUpdateAvailable()
+
+	return true, updateAvailable, days, nil
+}
+
+// IsUpdateAvailable checks if an update is available via package manager
+func (vt *VMToolsTuner) IsUpdateAvailable() bool {
+	// This is a "best effort" check based on local cache
+	if vt.Distro.Type == DistroDebian {
+		// apt-get -s install --only-upgrade open-vm-tools
+		cmd := exec.Command("apt-get", "-s", "install", "--only-upgrade", "open-vm-tools")
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.Contains(string(out), "Inst open-vm-tools") {
+			return true
+		}
+	} else if vt.Distro.Type == DistroRHEL {
+		// yum check-update open-vm-tools
+		// Exit code 100 means updates available
+		cmd := exec.Command("yum", "check-update", "open-vm-tools")
+		err := cmd.Run()
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				if exitError.ExitCode() == 100 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// UpdateTools attempts to update the package
+func (vt *VMToolsTuner) UpdateTools() error {
+	PrintInfo("Updating open-vm-tools...")
+	if err := vt.Distro.InstallPackage("open-vm-tools"); err != nil {
+		return err
+	}
+	return vt.ensureService()
+}
+
+
+========================================
+File: go.mod
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\go.mod
+========================================
+
+module vmware-tuner
+
+go 1.19
+
+require (
+	github.com/fatih/color v1.16.0
+	github.com/spf13/cobra v1.8.0
+)
+
+require (
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
+	golang.org/x/sys v0.14.0 // indirect
+)
+
+
+========================================
+File: README.md
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\README.md
+========================================
+
+# VMware Tuner (Linux)
+
+**The Ultimate Swiss Army Knife for VMware Linux VMs.**
+
+`vmware-tuner` is a comprehensive, safe, and interactive tool designed to optimize, audit, maintain, and troubleshoot Linux virtual machines running on VMware ESXi/Workstation.
+
+It supports **Debian, Ubuntu, RHEL, CentOS, AlmaLinux, and Rocky Linux**.
+
+## 🚀 Key Features
+
+The tool provides a unified interactive menu with **16 modules**:
+
+### 🛠️ Optimization & Tuning
+*   **[1] Optimize this VM**: Applies industry-standard tuning:
+    *   **GRUB**: Optimizes I/O scheduler (`noop`/`none`) and memory pages.
+    *   **Sysctl**: Tunes `swappiness`, `dirty_ratio`, and network buffers.
+    *   **Network**: Enables `tx-checksumming`, `tso`, `gso` for VMXNET3.
+    *   **Disk**: Optimizes `fstab` (noatime) and block device settings.
+    *   **VMware Tools**: Ensures `open-vm-tools` is installed and running.
+    *   **Debloat**: (Optional) Disables unused services (Server Slim mode).
+
+### 🛡️ Safety & Backup
+*   **[2] Restore a Backup**: Every change is backed up. You can rollback to any previous state instantly.
+*   **[3] Audit System**: Scans the VM and gives an optimization score (0-100).
+*   **[16] Safe System Update**: Checks disk space (>1GB) before running `apt/dnf update` and detects if a reboot is needed.
+
+### 🔧 Maintenance & Tools
+*   **[4] Expand Disk**: Safely expands the root partition and filesystem (`ext4`/`xfs`) after increasing disk size in vSphere.
+*   **[5] Fix Time Sync**: Detects NTP conflicts and ensures accurate timekeeping.
+*   **[6] Clean System**: Frees space safely (Package cache, Journal vacuum).
+*   **[13] Manage Swap**: Creates a 2GB swapfile if missing (prevents OOM crashes).
+*   **[8] Schedule Maintenance**: Creates a Cron job for daily time sync and weekly cleaning.
+
+### 🔍 Troubleshooting & Info
+*   **[9] System Info**: Dashboard with OS, Kernel, CPU, RAM, and IP stats.
+*   **[10] Network Benchmark**: Tests latency and download speed (100MB test file, auto-deleted).
+*   **[12] Check Virtual Hardware**: Verifies you are using `vmxnet3` and `pvscsi` drivers.
+*   **[14] Scan Logs for Errors**: Scans `dmesg` and `syslog` for critical errors (OOM, I/O, SCSI).
+*   **[15] Optimize Docker**: Configures log rotation to prevent disk saturation and offers system prune.
+
+### ⚡ Expert
+*   **[7] Secure SSH**: Hardens SSH config (Disable Root/Password) with auto-rollback if syntax check fails.
+*   **[11] Seal VM for Template**: Prepares the VM for cloning (Resets Machine ID, SSH Keys, Logs). **Destructive!**
+
+---
+
+## 📥 Installation
+
+### Option 1: Download Binary (Recommended)
+Download the latest release for your architecture (usually `amd64`).
+
+```bash
+wget -O vmware-tuner https://github.com/julo0211/vmware-tuner/releases/latest/download/vmware-tuner-linux-amd64
+chmod +x vmware-tuner
+sudo ./vmware-tuner
+```
+
+### Option 2: Build from Source
+Requires Go 1.21+.
+
+```bash
+git clone https://github.com/julo0211/vmware-tuner.git
+cd vmware-tuner
+go mod tidy
+go build -o vmware-tuner ./cmd/vmware-tuner
+sudo ./vmware-tuner
+```
+
+---
+
+## 📖 Usage
+
+Simply run the tool as root:
+
+```bash
+sudo ./vmware-tuner
+```
+
+You will see the interactive menu:
+
+```text
+  [1] Optimize this VM (Tuning)
+  [2] Restore a backup (Rollback)
+  [3] Audit System (Score)
+  ...
+  [16] Safe System Update
+  [0]  Exit
+```
+
+### Non-Interactive Mode (Automation)
+You can also use flags for automation scripts (Ansible, etc.):
+
+```bash
+# Apply all optimizations automatically
+sudo ./vmware-tuner --dry-run=false --install-tools=true
+
+# Show current config
+sudo ./vmware-tuner show
+
+# Verify optimizations
+sudo ./vmware-tuner verify
+```
+
+---
+
+## ⚠️ Safety First
+
+This tool is designed for **Production**.
+1.  **Backups**: Configuration files (`grub`, `sysctl.conf`, `sshd_config`) are backed up before modification.
+2.  **Checks**: Destructive actions (Disk Expand, Seal VM) require explicit confirmation.
+3.  **Validation**: SSH config is verified (`sshd -t`) before restart.
+
+## License
+
+MIT License

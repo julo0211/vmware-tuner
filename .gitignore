@@ -1,0 +1,19 @@
+# Binaries
+/vmware-tuner
+/vmware-tuner.exe
+*.exe
+*.dll
+
+# Go build
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+*.log
+*.tmp
+.vmware-tuner-backups/
+services.txt
