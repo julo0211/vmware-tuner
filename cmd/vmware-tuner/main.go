@@ -123,8 +123,8 @@ func runTuner(cmd *cobra.Command, args []string) error {
 			}, true},
 			2: {"Restore a backup (Rollback)", runRollbackInteractive, true},
 			3: {"Audit System (Score)", func() error { return tuner.NewAuditTuner(distro).RunAudit() }, true},
-			4: {"Expand Disk", func() error { return tuner.NewDiskTuner(distro).ExpandRoot() }, true},
-			5: {"Fix Time Sync", func() error { return tuner.NewTimeSyncTuner(distro).Run() }, true},
+			4: {"Expand Disk", func() error { return tuner.NewDiskTuner(distro).ExpandRoot(hasInternet) }, true},
+			5: {"Fix Time Sync", func() error { return tuner.NewTimeSyncTuner(distro).Run(hasInternet) }, true},
 			6: {"Clean System", func() error { return tuner.NewCleanerTuner(distro).Run() }, true},
 			7: {"Secure SSH", func() error {
 				backup := tuner.NewBackupManager()
@@ -135,7 +135,7 @@ func runTuner(cmd *cobra.Command, args []string) error {
 			}, true},
 			8:  {"Schedule Maintenance", func() error { return tuner.NewCronTuner().Run() }, true},
 			9:  {"System Info", func() error { return tuner.NewInfoTuner().Run() }, false},
-			10: {"Network Benchmark", func() error { return tuner.NewBenchmarkTuner().Run() }, false},
+			10: {"Network Benchmark", func() error { return tuner.NewBenchmarkTuner().Run(hasInternet) }, false},
 			11: {"Seal VM for Template (Expert)", func() error { return tuner.NewTemplateTuner().Run() }, true},
 			12: {"Check Virtual Hardware", func() error { return tuner.NewHardwareTuner(distro).Run() }, false},
 			13: {"Manage Swap", func() error { return tuner.NewSwapTuner().Run() }, true},

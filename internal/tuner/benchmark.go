@@ -19,7 +19,7 @@ func NewBenchmarkTuner() *BenchmarkTuner {
 }
 
 // Run performs the benchmark
-func (bt *BenchmarkTuner) Run() error {
+func (bt *BenchmarkTuner) Run(hasInternet bool) error {
 	PrintStep("Network Benchmark")
 
 	// 1. Latency Test (Ping Gateway)
@@ -47,6 +47,11 @@ func (bt *BenchmarkTuner) Run() error {
 
 	// 2. Download Speed Test
 	fmt.Println()
+	if !hasInternet {
+		PrintInfo("Skipping download speed test (Offline Mode)")
+		return nil
+	}
+
 	PrintInfo("Testing download speed...")
 	PrintInfo("Downloading 100MB test file (will be deleted immediately)...")
 
@@ -66,7 +71,7 @@ func (bt *BenchmarkTuner) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %v", err)
 	}
-	
+
 	// CRITICAL: Ensure file is deleted
 	defer func() {
 		out.Close()
@@ -103,7 +108,7 @@ func getGateway() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "default") {

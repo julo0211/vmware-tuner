@@ -18,7 +18,7 @@ func NewTimeSyncTuner(distro *DistroManager) *TimeSyncTuner {
 }
 
 // Run performs the time sync check and fix
-func (t *TimeSyncTuner) Run() error {
+func (t *TimeSyncTuner) Run(hasInternet bool) error {
 	PrintStep("Time Synchronization Doctor")
 
 	// 1. Check for existing NTP services
@@ -35,7 +35,7 @@ func (t *TimeSyncTuner) Run() error {
 
 	if activeService != "" {
 		PrintSuccess("Time synchronization is active via: %s", activeService)
-		
+
 		// Force sync
 		PrintInfo("Forcing time synchronization...")
 		if activeService == "chronyd" {
@@ -44,28 +44,38 @@ func (t *TimeSyncTuner) Run() error {
 			// systemd-timesyncd doesn't have a simple force command, restart triggers it
 			exec.Command("systemctl", "restart", "systemd-timesyncd").Run()
 		}
-		
+
 		// Ensure VMware Tools sync is disabled to avoid conflict
 		PrintInfo("Disabling VMware Tools periodic time sync (best practice with NTP)...")
 		exec.Command("vmware-toolbox-cmd", "timesync", "disable").Run()
-		
+
 		return nil
 	}
 
 	PrintWarning("No active NTP service found!")
-	
+
 	// 2. If no NTP, offer to enable VMware Tools sync or install chrony
 	fmt.Println()
 	fmt.Println("Options:")
-	fmt.Println("  [1] Install/Enable Chrony (Recommended)")
+
+	if hasInternet {
+		fmt.Println("  [1] Install/Enable Chrony (Recommended)")
+	} else {
+		// Greyed out or hidden
+		PrintInfo("  [1] Install Chrony (Unavailable - Offline)")
+	}
 	fmt.Println("  [2] Enable VMware Tools Host Sync (Fallback)")
 	fmt.Println("  [3] Skip")
 	fmt.Print("Choice: ")
-	
+
 	var choice string
 	fmt.Scanln(&choice)
 
 	if choice == "1" {
+		if !hasInternet {
+			PrintWarning("Cannot install Chrony in offline mode. Please use VMware Tools Sync.")
+			return nil
+		}
 		pkg := "chrony"
 		if t.Distro.Type == DistroDebian {
 			pkg = "chrony"

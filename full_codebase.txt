@@ -130,8 +130,8 @@ func runTuner(cmd *cobra.Command, args []string) error {
 			}, true},
 			2: {"Restore a backup (Rollback)", runRollbackInteractive, true},
 			3: {"Audit System (Score)", func() error { return tuner.NewAuditTuner(distro).RunAudit() }, true},
-			4: {"Expand Disk", func() error { return tuner.NewDiskTuner(distro).ExpandRoot() }, true},
-			5: {"Fix Time Sync", func() error { return tuner.NewTimeSyncTuner(distro).Run() }, true},
+			4: {"Expand Disk", func() error { return tuner.NewDiskTuner(distro).ExpandRoot(hasInternet) }, true},
+			5: {"Fix Time Sync", func() error { return tuner.NewTimeSyncTuner(distro).Run(hasInternet) }, true},
 			6: {"Clean System", func() error { return tuner.NewCleanerTuner(distro).Run() }, true},
 			7: {"Secure SSH", func() error {
 				backup := tuner.NewBackupManager()
@@ -142,7 +142,7 @@ func runTuner(cmd *cobra.Command, args []string) error {
 			}, true},
 			8:  {"Schedule Maintenance", func() error { return tuner.NewCronTuner().Run() }, true},
 			9:  {"System Info", func() error { return tuner.NewInfoTuner().Run() }, false},
-			10: {"Network Benchmark", func() error { return tuner.NewBenchmarkTuner().Run() }, false},
+			10: {"Network Benchmark", func() error { return tuner.NewBenchmarkTuner().Run(hasInternet) }, false},
 			11: {"Seal VM for Template (Expert)", func() error { return tuner.NewTemplateTuner().Run() }, true},
 			12: {"Check Virtual Hardware", func() error { return tuner.NewHardwareTuner(distro).Run() }, false},
 			13: {"Manage Swap", func() error { return tuner.NewSwapTuner().Run() }, true},
@@ -951,7 +951,7 @@ func NewBenchmarkTuner() *BenchmarkTuner {
 }
 
 // Run performs the benchmark
-func (bt *BenchmarkTuner) Run() error {
+func (bt *BenchmarkTuner) Run(hasInternet bool) error {
 	PrintStep("Network Benchmark")
 
 	// 1. Latency Test (Ping Gateway)
@@ -979,6 +979,11 @@ func (bt *BenchmarkTuner) Run() error {
 
 	// 2. Download Speed Test
 	fmt.Println()
+	if !hasInternet {
+		PrintInfo("Skipping download speed test (Offline Mode)")
+		return nil
+	}
+
 	PrintInfo("Testing download speed...")
 	PrintInfo("Downloading 100MB test file (will be deleted immediately)...")
 
@@ -998,7 +1003,7 @@ func (bt *BenchmarkTuner) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %v", err)
 	}
-	
+
 	// CRITICAL: Ensure file is deleted
 	defer func() {
 		out.Close()
@@ -1035,7 +1040,7 @@ func getGateway() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "default") {
@@ -1403,7 +1408,7 @@ type LsblkOutput struct {
 }
 
 // ExpandRoot expands the root partition and filesystem
-func (dt *DiskTuner) ExpandRoot() error {
+func (dt *DiskTuner) ExpandRoot(hasInternet bool) error {
 	PrintStep("Disk Expansion Assistant")
 
 	PrintWarning("⚠️  ATTENTION : Les opérations sur disque comportent un risque.")
@@ -1415,10 +1420,21 @@ func (dt *DiskTuner) ExpandRoot() error {
 		return nil
 	}
 
-	// 1. Install dependencies
-	if err := dt.Distro.InstallPackage("cloud-guest-utils"); err != nil {
-		// Fallback for RHEL-based systems
-		dt.Distro.InstallPackage("cloud-utils-growpart")
+	// 1. Check/Install dependencies (growpart)
+	if _, err := exec.LookPath("growpart"); err != nil {
+		PrintWarning("Outil 'growpart' manquant.")
+
+		if !hasInternet {
+			return fmt.Errorf("impossible d'installer 'growpart' en mode Hors-Ligne. Veuillez l'installer manuellement (cloud-guest-utils)")
+		}
+
+		PrintInfo("Tentative d'installation...")
+		if err := dt.Distro.InstallPackage("cloud-guest-utils"); err != nil {
+			// Fallback for RHEL-based systems
+			if err := dt.Distro.InstallPackage("cloud-utils-growpart"); err != nil {
+				return fmt.Errorf("échec de l'installation de growpart: %v", err)
+			}
+		}
 	}
 
 	// 2. Identify root device using lsblk JSON
@@ -3704,7 +3720,7 @@ func NewTimeSyncTuner(distro *DistroManager) *TimeSyncTuner {
 }
 
 // Run performs the time sync check and fix
-func (t *TimeSyncTuner) Run() error {
+func (t *TimeSyncTuner) Run(hasInternet bool) error {
 	PrintStep("Time Synchronization Doctor")
 
 	// 1. Check for existing NTP services
@@ -3721,7 +3737,7 @@ func (t *TimeSyncTuner) Run() error {
 
 	if activeService != "" {
 		PrintSuccess("Time synchronization is active via: %s", activeService)
-		
+
 		// Force sync
 		PrintInfo("Forcing time synchronization...")
 		if activeService == "chronyd" {
@@ -3730,28 +3746,38 @@ func (t *TimeSyncTuner) Run() error {
 			// systemd-timesyncd doesn't have a simple force command, restart triggers it
 			exec.Command("systemctl", "restart", "systemd-timesyncd").Run()
 		}
-		
+
 		// Ensure VMware Tools sync is disabled to avoid conflict
 		PrintInfo("Disabling VMware Tools periodic time sync (best practice with NTP)...")
 		exec.Command("vmware-toolbox-cmd", "timesync", "disable").Run()
-		
+
 		return nil
 	}
 
 	PrintWarning("No active NTP service found!")
-	
+
 	// 2. If no NTP, offer to enable VMware Tools sync or install chrony
 	fmt.Println()
 	fmt.Println("Options:")
-	fmt.Println("  [1] Install/Enable Chrony (Recommended)")
+
+	if hasInternet {
+		fmt.Println("  [1] Install/Enable Chrony (Recommended)")
+	} else {
+		// Greyed out or hidden
+		PrintInfo("  [1] Install Chrony (Unavailable - Offline)")
+	}
 	fmt.Println("  [2] Enable VMware Tools Host Sync (Fallback)")
 	fmt.Println("  [3] Skip")
 	fmt.Print("Choice: ")
-	
+
 	var choice string
 	fmt.Scanln(&choice)
 
 	if choice == "1" {
+		if !hasInternet {
+			PrintWarning("Cannot install Chrony in offline mode. Please use VMware Tools Sync.")
+			return nil
+		}
 		pkg := "chrony"
 		if t.Distro.Type == DistroDebian {
 			pkg = "chrony"
@@ -4345,15 +4371,23 @@ File: README.md
 Path: C:\Users\Administrator\Desktop\vmware-tuner-main\README.md
 ========================================
 
-# VMware Tuner (Linux)
+# VMware Tuner (Enterprise)
 
 **The Ultimate Swiss Army Knife for VMware Linux VMs.**
 
 `vmware-tuner` is a comprehensive, safe, and interactive tool designed to optimize, audit, maintain, and troubleshoot Linux virtual machines running on VMware ESXi/Workstation.
 
+**🚀 Enterprise Edition (Air-Gap Ready)**
+
 It supports **Debian, Ubuntu, RHEL, CentOS, AlmaLinux, and Rocky Linux**.
 
 ## 🚀 Key Features
+
+This Enterprise version adds specific features for secured environments:
+*   **🔌 Hybrid Connectivity / Offline Mode**: Automatically detects internet access using HTTP HEAD (no ICMP). Falls back gracefully if offline.
+*   **📦 Air-Gap Ready**: Can be compiled with all dependencies (`vendor/`) for isolated servers.
+*   **⏪ Native Rollback**: Zero-dependency rollback system using a JSON manifest. No generated scripts.
+*   **🔒 Security Hardened**: Robust execution paths, non-interactive apt, and safe inputs.
 
 The tool provides a unified interactive menu with **16 modules**:
 
@@ -4362,12 +4396,12 @@ The tool provides a unified interactive menu with **16 modules**:
     *   **GRUB**: Optimizes I/O scheduler (`noop`/`none`) and memory pages.
     *   **Sysctl**: Tunes `swappiness`, `dirty_ratio`, and network buffers.
     *   **Network**: Enables `tx-checksumming`, `tso`, `gso` for VMXNET3.
-    *   **Disk**: Optimizes `fstab` (noatime) and block device settings.
+    *   **Disk**: Optimizes `fstab` (noatime) and block device settings (Robust `lsblk -J` parsing).
     *   **VMware Tools**: Ensures `open-vm-tools` is installed and running.
     *   **Debloat**: (Optional) Disables unused services (Server Slim mode).
 
 ### 🛡️ Safety & Backup
-*   **[2] Restore a Backup**: Every change is backed up. You can rollback to any previous state instantly.
+*   **[2] Restore a Backup**: Every change is backed up. You can rollback to any previous state instantly via the Manifest system.
 *   **[3] Audit System**: Scans the VM and gives an optimization score (0-100).
 *   **[16] Safe System Update**: Checks disk space (>1GB) before running `apt/dnf update` and detects if a reboot is needed.
 
@@ -4393,14 +4427,16 @@ The tool provides a unified interactive menu with **16 modules**:
 
 ## 📥 Installation
 
-### Option 1: Download Binary (Recommended)
-Download the latest release for your architecture (usually `amd64`).
+### Option 1: Download Binary (Air-Gap)
+Download the latest `linux-amd64` release and transfer it to your server.
 
 ```bash
-wget -O vmware-tuner https://github.com/julo0211/vmware-tuner/releases/latest/download/vmware-tuner-linux-amd64
-chmod +x vmware-tuner
-sudo ./vmware-tuner
+chmod +x vmware-tuner-v1.1.0-linux-amd64
+sudo mv vmware-tuner-v1.1.0-linux-amd64 /usr/local/bin/vmware-tuner
+sudo vmware-tuner
 ```
+
+See [INSTALL.md](INSTALL.md) for detailed instructions.
 
 ### Option 2: Build from Source
 Requires Go 1.21+.

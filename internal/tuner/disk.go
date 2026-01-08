@@ -34,7 +34,7 @@ type LsblkOutput struct {
 }
 
 // ExpandRoot expands the root partition and filesystem
-func (dt *DiskTuner) ExpandRoot() error {
+func (dt *DiskTuner) ExpandRoot(hasInternet bool) error {
 	PrintStep("Disk Expansion Assistant")
 
 	PrintWarning("⚠️  ATTENTION : Les opérations sur disque comportent un risque.")
@@ -46,10 +46,21 @@ func (dt *DiskTuner) ExpandRoot() error {
 		return nil
 	}
 
-	// 1. Install dependencies
-	if err := dt.Distro.InstallPackage("cloud-guest-utils"); err != nil {
-		// Fallback for RHEL-based systems
-		dt.Distro.InstallPackage("cloud-utils-growpart")
+	// 1. Check/Install dependencies (growpart)
+	if _, err := exec.LookPath("growpart"); err != nil {
+		PrintWarning("Outil 'growpart' manquant.")
+
+		if !hasInternet {
+			return fmt.Errorf("impossible d'installer 'growpart' en mode Hors-Ligne. Veuillez l'installer manuellement (cloud-guest-utils)")
+		}
+
+		PrintInfo("Tentative d'installation...")
+		if err := dt.Distro.InstallPackage("cloud-guest-utils"); err != nil {
+			// Fallback for RHEL-based systems
+			if err := dt.Distro.InstallPackage("cloud-utils-growpart"); err != nil {
+				return fmt.Errorf("échec de l'installation de growpart: %v", err)
+			}
+		}
 	}
 
 	// 2. Identify root device using lsblk JSON
