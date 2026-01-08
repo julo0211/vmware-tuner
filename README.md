@@ -30,7 +30,7 @@ The tool provides a unified interactive menu with **16 modules**:
 ### 🛡️ Safety & Backup
 *   **[2] Restore a Backup**: Every change is backed up. You can rollback to any previous state instantly via the Manifest system.
 *   **[3] Audit System**: Scans the VM and gives an optimization score (0-100).
-*   **[16] Safe System Update**: Checks disk space (>1GB) before running `apt/dnf update`.
+*   **[16] Safe System Update**: Checks disk space (>1GB) before running `apt/dnf update` and detects if a reboot is needed.
 
 ### 🔧 Maintenance & Tools
 *   **[4] Expand Disk**: Safely expands the root partition and filesystem (`ext4`/`xfs`) after increasing disk size in vSphere.
