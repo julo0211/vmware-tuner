@@ -4503,22 +4503,24 @@ File: SECURITY_CHANGELOG.md
 Path: C:\Users\Administrator\Desktop\vmware-tuner-main\SECURITY_CHANGELOG.md
 ========================================
 
-# Changelog Sécurité & Robustesse
+# Changelog : Intelligence Air-Gap & Robustesse
 
-Voici le résumé des modifications appliquées suite à la Code Review de sécurité :
+Mise à jour de la logique pour gérer intelligemment les environnements déconnectés (Air-Gap).
 
-## 1. Durcissement du Service Systemd (`internal/tuner/network.go`)
-**Objectif :** Prévenir les attaques par injection de PATH lors du démarrage du service.
-*   [x] Utilisation de chemins absolus pour toutes les commandes critiques dans le fichier `.service`.
-    *   `ls` -> `/usr/bin/ls`
-    *   `grep` -> `/usr/bin/grep`
-    *   `ethtool` -> `/usr/sbin/ethtool`
+## 1. Disk Tuner (Extension Disque)
+**Fichier :** internal/tuner/disk.go
+*   **Problème corrigé** : Tentative d'installation de paquets (pt/yum) bloquante en l'absence d'internet.
+*   **Correction** : Vérification préalable de l'existence binaire growpart localement.
+*   **Comportement** : Si l'outil manque et qu'il n'y a pas d'internet, l'opération s'arrête proprement sans timeout, invitant l'utilisateur à installer cloud-guest-utils via le binaire.
 
-## 2. Optimisation du Listing Réseau (`internal/tuner/network.go`)
-**Objectif :** Éliminer la dépendance fragile à un shell (`bash -c`) pour lister les interfaces.
-*   [x] Remplacement de `exec.Command("ls /sys/class/net/")` par l'appel natif Go `os.ReadDir("/sys/class/net")`.
-*   [x] Filtrage natif des interfaces (`ens*`, `eth*`) sans utiliser `grep`.
+## 2. Network Benchmark
+**Fichier :** internal/tuner/benchmark.go
+*   **Problème corrigé** : Crash ou timeout lors de la tentative de téléchargement du fichier de test (Speedtest) en mode hors-ligne.
+*   **Correction** : Conditionnement du test de téléchargement à la détection de connectivité (hasInternet).
+*   **Comportement** : En mode Hors-Ligne, seul le test de latence locale (Ping Gateway) est exécuté.
 
-## 3. Automatisation APT (`internal/tuner/distro.go`)
-**Objectif :** Éviter les blocages lors des mises à jour sur Debian/Ubuntu.
-*   [x] Injection de la variable d'environnement `DEBIAN_FRONTEND=noninteractive` lors des appels à `apt-get`.
+## 3. Time Synchronization
+**Fichier :** internal/tuner/timesync.go
+*   **Problème corrigé** : Proposition d'options impossibles (Installer Chrony) en mode déconnecté.
+*   **Correction** : Filtrage dynamique du menu interactif.
+*   **Comportement** : Si hors-ligne, l'option "Installer Chrony" est grisée/désactivée. Seule l'option "VMware Tools Host Sync" (locale) est proposée comme active.
