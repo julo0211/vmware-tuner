@@ -33,13 +33,13 @@ Type=oneshot
 RemainOnExit=yes
 
 # Increase ring buffers (ONLY for vmxnet3 to avoid e1000 hangs)
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; fi; done'
+ExecStart=/bin/bash -c 'for iface in $(/usr/bin/ls /sys/class/net/ | /usr/bin/grep -E "^(ens|eth)"); do if /usr/sbin/ethtool -i $iface | /usr/bin/grep -q "driver: vmxnet3"; then /usr/sbin/ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; fi; done'
 
 # Enable hardware offloading features (ONLY for vmxnet3)
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -K $iface gso on gro on tso on 2>/dev/null || true; fi; done'
+ExecStart=/bin/bash -c 'for iface in $(/usr/bin/ls /sys/class/net/ | /usr/bin/grep -E "^(ens|eth)"); do if /usr/sbin/ethtool -i $iface | /usr/bin/grep -q "driver: vmxnet3"; then /usr/sbin/ethtool -K $iface gso on gro on tso on 2>/dev/null || true; fi; done'
 
 # Set interrupt coalescing (ONLY for vmxnet3)
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; fi; done'
+ExecStart=/bin/bash -c 'for iface in $(/usr/bin/ls /sys/class/net/ | /usr/bin/grep -E "^(ens|eth)"); do if /usr/sbin/ethtool -i $iface | /usr/bin/grep -q "driver: vmxnet3"; then /usr/sbin/ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; fi; done'
 
 [Install]
 WantedBy=multi-user.target
@@ -145,17 +145,19 @@ func (nt *NetworkTuner) ShowCurrent() error {
 
 // getNetworkInterfaces returns a list of network interfaces
 func (nt *NetworkTuner) getNetworkInterfaces() ([]string, error) {
-	cmd := exec.Command("bash", "-c", "ls /sys/class/net/ | grep -E '^(ens|eth)'")
-	output, err := cmd.Output()
+	entries, err := os.ReadDir("/sys/class/net")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get network interfaces: %w", err)
+		return nil, fmt.Errorf("failed to read /sys/class/net: %w", err)
 	}
 
-	interfaces := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(interfaces) == 1 && interfaces[0] == "" {
-		return []string{}, nil
+	var interfaces []string
+	for _, entry := range entries {
+		name := entry.Name()
+		// Filter typical ethernet interfaces
+		if strings.HasPrefix(name, "ens") || strings.HasPrefix(name, "eth") {
+			interfaces = append(interfaces, name)
+		}
 	}
-
 	return interfaces, nil
 }
 

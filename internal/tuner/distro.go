@@ -48,8 +48,8 @@ func (dm *DistroManager) detect() error {
 	if strings.Contains(contentLower, "debian") || strings.Contains(contentLower, "ubuntu") {
 		dm.Type = DistroDebian
 		dm.Name = "Debian/Ubuntu"
-	} else if strings.Contains(contentLower, "rhel") || strings.Contains(contentLower, "centos") || 
-		strings.Contains(contentLower, "fedora") || strings.Contains(contentLower, "almalinux") || 
+	} else if strings.Contains(contentLower, "rhel") || strings.Contains(contentLower, "centos") ||
+		strings.Contains(contentLower, "fedora") || strings.Contains(contentLower, "almalinux") ||
 		strings.Contains(contentLower, "rocky") {
 		dm.Type = DistroRHEL
 		dm.Name = "RHEL/CentOS"
@@ -81,6 +81,7 @@ func (dm *DistroManager) InstallPackage(pkg string) error {
 		// Update apt cache first? Maybe too slow. Just try install.
 		// apt-get install -y <pkg>
 		cmd = exec.Command("apt-get", "install", "-y", pkg)
+		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	case DistroRHEL:
 		// dnf install -y <pkg> (or yum)
 		if _, err := exec.LookPath("dnf"); err == nil {
@@ -116,13 +117,13 @@ func (dm *DistroManager) UpdateGrub() error {
 	case DistroRHEL:
 		// Detect correct output path for grub2-mkconfig
 		outputPath := "/boot/grub2/grub.cfg"
-		
+
 		// Check for UEFI
 		if _, err := os.Stat("/sys/firmware/efi"); err == nil {
 			// UEFI detected
 			// RHEL 7/8/9 location variations
 			// Common paths: /boot/efi/EFI/redhat/grub.cfg, /boot/efi/EFI/centos/grub.cfg
-			
+
 			// Try to find the correct path
 			candidates := []string{
 				"/boot/efi/EFI/redhat/grub.cfg",
@@ -131,7 +132,7 @@ func (dm *DistroManager) UpdateGrub() error {
 				"/boot/efi/EFI/rocky/grub.cfg",
 				"/boot/efi/EFI/fedora/grub.cfg",
 			}
-			
+
 			found := false
 			for _, path := range candidates {
 				if _, err := os.Stat(path); err == nil {
@@ -140,7 +141,7 @@ func (dm *DistroManager) UpdateGrub() error {
 					break
 				}
 			}
-			
+
 			// On newer RHEL (9.3+), /boot/grub2/grub.cfg might be the unified location even for EFI
 			// If no specific EFI file found, stick to /boot/grub2/grub.cfg or try to detect if it's a symlink?
 			// For now, if not found in EFI partition, default to /boot/grub2/grub.cfg

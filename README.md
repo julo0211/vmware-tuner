@@ -1,12 +1,20 @@
-# VMware Tuner (Linux)
+# VMware Tuner (Enterprise)
 
 **The Ultimate Swiss Army Knife for VMware Linux VMs.**
 
 `vmware-tuner` is a comprehensive, safe, and interactive tool designed to optimize, audit, maintain, and troubleshoot Linux virtual machines running on VMware ESXi/Workstation.
 
+**🚀 Enterprise Edition (Air-Gap Ready)**
+
 It supports **Debian, Ubuntu, RHEL, CentOS, AlmaLinux, and Rocky Linux**.
 
 ## 🚀 Key Features
+
+This Enterprise version adds specific features for secured environments:
+*   **🔌 Hybrid Connectivity / Offline Mode**: Automatically detects internet access using HTTP HEAD (no ICMP). Falls back gracefully if offline.
+*   **📦 Air-Gap Ready**: Can be compiled with all dependencies (`vendor/`) for isolated servers.
+*   **⏪ Native Rollback**: Zero-dependency rollback system using a JSON manifest. No generated scripts.
+*   **🔒 Security Hardened**: Robust execution paths, non-interactive apt, and safe inputs.
 
 The tool provides a unified interactive menu with **16 modules**:
 
@@ -15,14 +23,14 @@ The tool provides a unified interactive menu with **16 modules**:
     *   **GRUB**: Optimizes I/O scheduler (`noop`/`none`) and memory pages.
     *   **Sysctl**: Tunes `swappiness`, `dirty_ratio`, and network buffers.
     *   **Network**: Enables `tx-checksumming`, `tso`, `gso` for VMXNET3.
-    *   **Disk**: Optimizes `fstab` (noatime) and block device settings.
+    *   **Disk**: Optimizes `fstab` (noatime) and block device settings (Robust `lsblk -J` parsing).
     *   **VMware Tools**: Ensures `open-vm-tools` is installed and running.
     *   **Debloat**: (Optional) Disables unused services (Server Slim mode).
 
 ### 🛡️ Safety & Backup
-*   **[2] Restore a Backup**: Every change is backed up. You can rollback to any previous state instantly.
+*   **[2] Restore a Backup**: Every change is backed up. You can rollback to any previous state instantly via the Manifest system.
 *   **[3] Audit System**: Scans the VM and gives an optimization score (0-100).
-*   **[16] Safe System Update**: Checks disk space (>1GB) before running `apt/dnf update` and detects if a reboot is needed.
+*   **[16] Safe System Update**: Checks disk space (>1GB) before running `apt/dnf update`.
 
 ### 🔧 Maintenance & Tools
 *   **[4] Expand Disk**: Safely expands the root partition and filesystem (`ext4`/`xfs`) after increasing disk size in vSphere.
@@ -46,14 +54,16 @@ The tool provides a unified interactive menu with **16 modules**:
 
 ## 📥 Installation
 
-### Option 1: Download Binary (Recommended)
-Download the latest release for your architecture (usually `amd64`).
+### Option 1: Download Binary (Air-Gap)
+Download the latest `linux-amd64` release and transfer it to your server.
 
 ```bash
-wget -O vmware-tuner https://github.com/julo0211/vmware-tuner/releases/latest/download/vmware-tuner-linux-amd64
-chmod +x vmware-tuner
-sudo ./vmware-tuner
+chmod +x vmware-tuner-v1.1.0-linux-amd64
+sudo mv vmware-tuner-v1.1.0-linux-amd64 /usr/local/bin/vmware-tuner
+sudo vmware-tuner
 ```
+
+See [INSTALL.md](INSTALL.md) for detailed instructions.
 
 ### Option 2: Build from Source
 Requires Go 1.21+.

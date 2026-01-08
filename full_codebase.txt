@@ -1610,8 +1610,8 @@ func (dm *DistroManager) detect() error {
 	if strings.Contains(contentLower, "debian") || strings.Contains(contentLower, "ubuntu") {
 		dm.Type = DistroDebian
 		dm.Name = "Debian/Ubuntu"
-	} else if strings.Contains(contentLower, "rhel") || strings.Contains(contentLower, "centos") || 
-		strings.Contains(contentLower, "fedora") || strings.Contains(contentLower, "almalinux") || 
+	} else if strings.Contains(contentLower, "rhel") || strings.Contains(contentLower, "centos") ||
+		strings.Contains(contentLower, "fedora") || strings.Contains(contentLower, "almalinux") ||
 		strings.Contains(contentLower, "rocky") {
 		dm.Type = DistroRHEL
 		dm.Name = "RHEL/CentOS"
@@ -1643,6 +1643,7 @@ func (dm *DistroManager) InstallPackage(pkg string) error {
 		// Update apt cache first? Maybe too slow. Just try install.
 		// apt-get install -y <pkg>
 		cmd = exec.Command("apt-get", "install", "-y", pkg)
+		cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	case DistroRHEL:
 		// dnf install -y <pkg> (or yum)
 		if _, err := exec.LookPath("dnf"); err == nil {
@@ -1678,13 +1679,13 @@ func (dm *DistroManager) UpdateGrub() error {
 	case DistroRHEL:
 		// Detect correct output path for grub2-mkconfig
 		outputPath := "/boot/grub2/grub.cfg"
-		
+
 		// Check for UEFI
 		if _, err := os.Stat("/sys/firmware/efi"); err == nil {
 			// UEFI detected
 			// RHEL 7/8/9 location variations
 			// Common paths: /boot/efi/EFI/redhat/grub.cfg, /boot/efi/EFI/centos/grub.cfg
-			
+
 			// Try to find the correct path
 			candidates := []string{
 				"/boot/efi/EFI/redhat/grub.cfg",
@@ -1693,7 +1694,7 @@ func (dm *DistroManager) UpdateGrub() error {
 				"/boot/efi/EFI/rocky/grub.cfg",
 				"/boot/efi/EFI/fedora/grub.cfg",
 			}
-			
+
 			found := false
 			for _, path := range candidates {
 				if _, err := os.Stat(path); err == nil {
@@ -1702,7 +1703,7 @@ func (dm *DistroManager) UpdateGrub() error {
 					break
 				}
 			}
-			
+
 			// On newer RHEL (9.3+), /boot/grub2/grub.cfg might be the unified location even for EFI
 			// If no specific EFI file found, stick to /boot/grub2/grub.cfg or try to detect if it's a symlink?
 			// For now, if not found in EFI partition, default to /boot/grub2/grub.cfg
@@ -2737,13 +2738,13 @@ Type=oneshot
 RemainOnExit=yes
 
 # Increase ring buffers (ONLY for vmxnet3 to avoid e1000 hangs)
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; fi; done'
+ExecStart=/bin/bash -c 'for iface in $(/usr/bin/ls /sys/class/net/ | /usr/bin/grep -E "^(ens|eth)"); do if /usr/sbin/ethtool -i $iface | /usr/bin/grep -q "driver: vmxnet3"; then /usr/sbin/ethtool -G $iface rx 4096 tx 4096 2>/dev/null || true; fi; done'
 
 # Enable hardware offloading features (ONLY for vmxnet3)
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -K $iface gso on gro on tso on 2>/dev/null || true; fi; done'
+ExecStart=/bin/bash -c 'for iface in $(/usr/bin/ls /sys/class/net/ | /usr/bin/grep -E "^(ens|eth)"); do if /usr/sbin/ethtool -i $iface | /usr/bin/grep -q "driver: vmxnet3"; then /usr/sbin/ethtool -K $iface gso on gro on tso on 2>/dev/null || true; fi; done'
 
 # Set interrupt coalescing (ONLY for vmxnet3)
-ExecStart=/bin/bash -c 'for iface in $(ls /sys/class/net/ | grep -E "^(ens|eth)"); do if ethtool -i $iface | grep -q "driver: vmxnet3"; then ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; fi; done'
+ExecStart=/bin/bash -c 'for iface in $(/usr/bin/ls /sys/class/net/ | /usr/bin/grep -E "^(ens|eth)"); do if /usr/sbin/ethtool -i $iface | /usr/bin/grep -q "driver: vmxnet3"; then /usr/sbin/ethtool -C $iface rx-usecs 10 tx-usecs 10 2>/dev/null || true; fi; done'
 
 [Install]
 WantedBy=multi-user.target
@@ -2849,17 +2850,19 @@ func (nt *NetworkTuner) ShowCurrent() error {
 
 // getNetworkInterfaces returns a list of network interfaces
 func (nt *NetworkTuner) getNetworkInterfaces() ([]string, error) {
-	cmd := exec.Command("bash", "-c", "ls /sys/class/net/ | grep -E '^(ens|eth)'")
-	output, err := cmd.Output()
+	entries, err := os.ReadDir("/sys/class/net")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get network interfaces: %w", err)
+		return nil, fmt.Errorf("failed to read /sys/class/net: %w", err)
 	}
 
-	interfaces := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(interfaces) == 1 && interfaces[0] == "" {
-		return []string{}, nil
+	var interfaces []string
+	for _, entry := range entries {
+		name := entry.Name()
+		// Filter typical ethernet interfaces
+		if strings.HasPrefix(name, "ens") || strings.HasPrefix(name, "eth") {
+			interfaces = append(interfaces, name)
+		}
 	}
-
 	return interfaces, nil
 }
 
@@ -4288,6 +4291,56 @@ require (
 
 
 ========================================
+File: INSTALL.md
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\INSTALL.md
+========================================
+
+# Guide d'Installation : VMware Tuner (Enterprise)
+
+## Pré-requis
+- OS : Debian 13 (Trixie), Debian 12, RHEL 8/9, Ubuntu 20.04+
+- Architecture : AMD64 (x86_64)
+- Droits : Root / Sudo
+
+## Installation
+
+### Option A : Environnement Air-Gap (Hors-Ligne)
+C'est la méthode recommandée pour les zones sécurisées.
+
+1. **Télécharger** le binaire `vmware-tuner-v1.1.0-linux-amd64` depuis le dépôt GitHub sur votre poste d'administration.
+2. **Transférer** le fichier vers le serveur (via SCP, WinSCP, ou clé USB).
+   Exemple SCP :
+   ```bash
+   scp path/to/vmware-tuner-v1.1.0-linux-amd64 user@serveur:/tmp/
+   ```
+3. **Installer** sur le serveur :
+   ```bash
+   cd /tmp
+   chmod +x vmware-tuner-v1.1.0-linux-amd64
+   sudo mv vmware-tuner-v1.1.0-linux-amd64 /usr/local/bin/vmware-tuner
+   ```
+
+### Option B : Installation Directe (Avec Internet)
+```bash
+wget -O vmware-tuner https://github.com/julo0211/vmware-tuner/raw/test-airgap-refactor/vmware-tuner-v1.1.0-linux-amd64
+chmod +x vmware-tuner
+sudo mv vmware-tuner /usr/local/bin/
+```
+
+## Utilisation
+
+Lancer l'outil en root :
+```bash
+sudo vmware-tuner
+```
+
+## Fonctionnalités Clés
+- **Mode Connecté/Hors-Ligne** : Détection automatique.
+- **Rollback** : Sauvegardes stockées dans `/root/.vmware-tuner-backups/`.
+- **Logs** : Visibles à l'écran.
+
+
+========================================
 File: README.md
 Path: C:\Users\Administrator\Desktop\vmware-tuner-main\README.md
 ========================================
@@ -4407,3 +4460,29 @@ This tool is designed for **Production**.
 ## License
 
 MIT License
+
+
+========================================
+File: SECURITY_CHANGELOG.md
+Path: C:\Users\Administrator\Desktop\vmware-tuner-main\SECURITY_CHANGELOG.md
+========================================
+
+# Changelog Sécurité & Robustesse
+
+Voici le résumé des modifications appliquées suite à la Code Review de sécurité :
+
+## 1. Durcissement du Service Systemd (`internal/tuner/network.go`)
+**Objectif :** Prévenir les attaques par injection de PATH lors du démarrage du service.
+*   [x] Utilisation de chemins absolus pour toutes les commandes critiques dans le fichier `.service`.
+    *   `ls` -> `/usr/bin/ls`
+    *   `grep` -> `/usr/bin/grep`
+    *   `ethtool` -> `/usr/sbin/ethtool`
+
+## 2. Optimisation du Listing Réseau (`internal/tuner/network.go`)
+**Objectif :** Éliminer la dépendance fragile à un shell (`bash -c`) pour lister les interfaces.
+*   [x] Remplacement de `exec.Command("ls /sys/class/net/")` par l'appel natif Go `os.ReadDir("/sys/class/net")`.
+*   [x] Filtrage natif des interfaces (`ens*`, `eth*`) sans utiliser `grep`.
+
+## 3. Automatisation APT (`internal/tuner/distro.go`)
+**Objectif :** Éviter les blocages lors des mises à jour sur Debian/Ubuntu.
+*   [x] Injection de la variable d'environnement `DEBIAN_FRONTEND=noninteractive` lors des appels à `apt-get`.

@@ -17,3 +17,9 @@
 *.tmp
 .vmware-tuner-backups/
 services.txt
+
+# Local Reports (Do not commit)
+full_codebase.txt
+SECURITY_CHANGELOG.md
+project_tree.txt
+
